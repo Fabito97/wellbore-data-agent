@@ -9,15 +9,18 @@ env/
 ENV/
 
 # Data
-data/uploads/*
-!data/uploads/.gitkeep
-data/vector_db/*
-!data/vector_db/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
+app/data/uploads/*
+!app/data/uploads/.gitkeep
+app/data/vector_db/*
+!app/data/vector_db/.gitkeep
+app/data/processed/*
+!app/data/processed/.gitkeep
 
 # Environment
 .env
+app/validation/
+app/telemetry/
+
 
 # IDE
 .vscode/
