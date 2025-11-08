@@ -75,10 +75,6 @@ class EmbeddingGenerator:
         - all-mpnet-base-v2: 768 dims, better quality, slower
         - e5-large: 1024 dims, SOTA quality, much slower
 
-        Why stick with MiniLM?
-        - Fast on CPU (hackathon constraint)
-        - Small enough for 16GB RAM
-        - Good enough for well reports
         """
         self.model_name = model_name or settings.EMBEDDING_MODEL
         self.device = device or settings.EMBEDDING_DEVICE
@@ -87,7 +83,7 @@ class EmbeddingGenerator:
         start_time = time.time()
 
         # Load model from HuggingFace
-        # Teaching: First run downloads model (~80MB)
+        # First run downloads model (~80MB)
         # Subsequent runs load from cache (~/.cache/huggingface/)
         self.model = SentenceTransformer(self.model_name, device=self.device)
 
@@ -113,7 +109,7 @@ class EmbeddingGenerator:
             show_progress: bool = True,
     ) -> List[DocumentChunk]:
         """
-        Generate embeddings for a list of chunks.
+        Generate embeddings for a list of chunks - Batch Processing
 
         Args:
             chunks: List of DocumentChunk objects
@@ -122,30 +118,12 @@ class EmbeddingGenerator:
 
         Returns:
             Same chunks with .embedding field populated
-
-        Teaching: Batch Processing
-
-        Why batch?
-        - Model can process multiple texts in parallel (even on CPU)
-        - Batch of 32: ~20ms total = 0.6ms per chunk
-        - One at a time: 32 × 10ms = 320ms
-        - 16x faster with batching!
-
-        How batching works:
-        1. Collect batch_size texts
-        2. Encode all at once → matrix of embeddings
-        3. Assign back to original chunks
-        4. Repeat for next batch
         """
         if not chunks:
             logger.warning("No chunks to embed!")
             return chunks
 
         # Extract just the text content for embedding
-        # Teaching: Why not embed the whole chunk object?
-        # - Model needs plain text strings
-        # - Embedding is just for the content
-        # - Metadata doesn't need embedding
         logger.info(f"Generating embeddings for {len(chunks)} chunks (batch_size={batch_size})")
         start_time = time.time()
 
@@ -159,11 +137,6 @@ class EmbeddingGenerator:
             batch_chunks = chunks[i:i + batch_size]
 
             # Generate embeddings for batch
-            # Teaching: model.encode() does:
-            # 1. Tokenize text (words → numbers)
-            # 2. Pass through neural network
-            # 3. Pool token embeddings → sentence embedding
-            # 4. Normalize to unit length (optional but recommended)
             embeddings = self.model.encode(
                 batch_texts,
                 convert_to_numpy=True, # Return numpy arrays
@@ -194,18 +167,6 @@ class EmbeddingGenerator:
     def embed_text(self, text: str) -> List[float]:
         """
         Generate embedding for a single text string.
-
-        Use case: Query embedding
-        - User asks: "What is the well depth?"
-        - Convert query to embedding
-        - Find similar chunk embeddings
-        - Return relevant chunks
-
-        Teaching: Query vs Document Embeddings
-        - Same model for both (important!)
-        - Query: User's question
-        - Document: Chunks from PDFs
-        - Similarity in same vector space
 
         Returns:
             List of floats (embedding vector)

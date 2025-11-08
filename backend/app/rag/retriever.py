@@ -3,11 +3,6 @@ Retriever - High-level interface for document retrieval.
 
 This module provides the clean RAG interface that the agent will use.
 It abstracts away the complexity of embedding, vector search, and result formatting.
-
-Teaching: Facade Pattern
-- Agent doesn't need to know about embeddings, ChromaDB, etc.
-- Just: "Give me relevant chunks for this query"
-- Clean separation of concerns
 """
 
 from app.utils.logger import get_logger
@@ -24,12 +19,6 @@ logger = get_logger(__name__)
 class RetrievalResult:
     """
     Single retrieval result with all necessary information.
-
-    Teaching: Why a dedicated class?
-    - Type safety
-    - Clear interface
-    - Easy to extend (add fields without breaking code)
-    - Self-documenting
     """
     chunk_id: str
     content: str
@@ -52,11 +41,6 @@ class RetrievalResult:
     def citation(self):
         """
         Generate citation string for LLM responses.
-
-        Teaching: Citations in RAG
-        - LLM should cite sources
-        - Format: "Source: filename, page X"
-        - Enables user to verify information
         """
         return f"{self.filename}, page {self.page_number}"
 
@@ -68,12 +52,6 @@ class DocumentRetriever:
     This is what the agent uses. Simple API:
     - retrieve(query) → Get relevant chunks
     - retrieve_with_filter() → Get specific chunks
-
-    Teaching: Encapsulation
-    - Hides complexity (embedding, vector DB, formatting)
-    - Provides simple interface
-    - Easy to swap implementations
-    - Testable in isolation
     """
 
     def __init__(
@@ -87,11 +65,6 @@ class DocumentRetriever:
         Args:
             top_k: Max results to return (default from settings)
             score_threshold: Min similarity score (default from settings)
-
-        Teaching: Configuration
-        - Defaults from settings (centralized config)
-        - Can override per instance (flexibility)
-        - Tunable for different use cases
         """
         self.vector_store = get_vector_store()
         self.top_k = top_k or settings.RETRIEVAL_TOP_K
@@ -110,7 +83,7 @@ class DocumentRetriever:
             filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievalResult]:
         """
-         Retrieve relevant chunks for a query.
+        This is the main RAG retrieval method! - Retrieve relevant chunks for a query.
 
          Args:
              query: User's question or search query
@@ -120,24 +93,8 @@ class DocumentRetriever:
          Returns:
              List of RetrievalResult objects, sorted by relevance
 
-         Teaching: This is the main RAG retrieval method!
-
          Process:
-         1. Convert query to embedding
-         2. Search vector store
-         3. Filter by score threshold
-         4. Format results
-         5. Return sorted by relevance
-
-         Example:
-         ```python
-         retriever = DocumentRetriever()
-         results = retriever.retrieve("What is the well depth?")
-
-         for result in results:
-             print(result.citation)
-             print(result.content)
-         ```
+         1. Convert query to embedding - Search vector store - Filter by score threshold - Format results - Return sorted by relevance
          """
         k = top_k or self.top_k
 
@@ -210,14 +167,14 @@ class DocumentRetriever:
             # Get all chunks from document
             raw_results = self.vector_store.collection.get(
                 where={"document_id": document_id},
-                include={"documents", "metadatas"},
+                include=["documents", "metadatas"],
                 limit=max_chunks,
             )
 
             # Convert to results
             results = []
             for i in range(len(raw_results['ids'])):
-                metadata = raw_results['metadata'][i]
+                metadata = raw_results['metadatas'][i]
 
                 result = RetrievalResult(
                     chunk_id=raw_results['ids'][i],
@@ -249,11 +206,6 @@ class DocumentRetriever:
         """
          Retrieve only table chunks (for parameter extraction).
 
-         Teaching: Specialized retrieval
-         - Tables contain structured data (parameters!)
-         - Filter by chunk_type = "table"
-         - Use for Sub-challenge 2 (parameter extraction)
-
          Example:
          ```python
          # Find tables with well parameters
@@ -284,11 +236,6 @@ class DocumentRetriever:
         - User: "Look at page 5"
         - Agent: Searches only page 5
         - Faster, more focused
-
-        Teaching: Combining vector search with filters
-        - Semantic similarity (query matching)
-        - Plus metadata constraints (page numbers)
-        - Best of both worlds!
         """
         # ChromaDB filter for page numbers
         # $in operator: match any of the list values
@@ -361,25 +308,7 @@ class DocumentRetriever:
             max_tokens: int = 2000
     ) -> str:
         """
-        Format retrieval results for LLM consumption.
-
-        Teaching: RAG context formatting
-
-        LLM prompt structure:
-        ```
-        Context from documents:
-
-        [Document 1, Page 5]
-        The well depth is 1500 meters...
-
-        [Document 1, Page 7]
-        Tubing diameter is 7 inches...
-
-        Question: {user_query}
-        Answer based on the context above:
-        ```
-
-        This method creates the "Context from documents" part.
+        Format retrieval results for LLM consumption. This method creates the "Context from documents" part.
 
         Args:
             results: Retrieved chunks

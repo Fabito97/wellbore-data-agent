@@ -1,12 +1,5 @@
 """
-Pydantic schemas for document processing and API responses.
-
-These models define the structure of data flowing through our system.
-Using Pydantic gives us:
-- Type safety (catches bugs early)
-- Automatic validation (ensures data integrity)
-- JSON serialization (easy API responses)
-- Documentation (self-documenting code)
+Pydantic schemas for document processing and API responses - defines the doc data structures for our system.
 """
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -17,9 +10,8 @@ from enum import Enum
 
 class DocumentStatus(str, Enum):
     """
-       Status of document processing pipeline.
-       Using Enum ensures only valid statuses are used (type safety).
-       """
+    Status of document processing pipeline - ensures only valid statuses are used (type safety).
+    """
     UPLOADED = "uploaded"  # File saved to disk
     PROCESSING = "processing"  # Currently being processed
     PROCESSED = "processed"  # Successfully processed
@@ -29,8 +21,7 @@ class DocumentStatus(str, Enum):
 
 class TableExtractionMethod(str, Enum):
     """
-    Methods for extracting tables from PDFs.
-    Different methods work better for different PDF types:
+    Different for extracting tables from PDFs like
     - PDFPLUMBER: Good for most PDFs, fast
     - CAMELOT: Better for complex tables, slower
     """
@@ -40,19 +31,13 @@ class TableExtractionMethod(str, Enum):
 # ==================== Core Document Models ====================
 class TableData(BaseModel):
     """
-    Represents a single table extracted from a PDF.
-
-    Why separate model?
-    - Tables are structured data (rows/columns)
-    - Need different handling than plain text
-    - Can be used for direct parameter extraction
+    Represents a single table extracted from a PDF - Need different handling than plain text
     """
     page_number: int = Field(..., description= "PDF page where table was found")
     table_index: int = Field(..., description= "Index of table on the (0-based")
     headers: List[str] = Field(default_factory=list, description= "Column headers")
     rows: List[List[str]] = Field(..., description= "Table data as list of rows")
     bbox: Optional[Dict[str, float]] = Field(default=None, description= "Bounding box {x0, y0, x1, y1}")
-
 
     @property
     def row_count(self):
@@ -67,12 +52,7 @@ class TableData(BaseModel):
 
     def to_markdown(self):
         """
-        Convert table to markdown format for better LLM understanding.
-
-        Why markdown?
-        - LLMs are trained on markdown tables
-        - Human-readable and machine-parseable
-        - Preserves structure in text format
+        Convert table to markdown format for better LLM understanding - Preserves structure in text format
         """
         if not self.rows:
             return ""
@@ -91,18 +71,11 @@ class TableData(BaseModel):
 
 class PageContent(BaseModel):
     """
-    Content extracted from a single page.
-
-    Why per-page?
-    - Preserves document structure
-    - Enables page-level citations
-    - Easier to debug extraction issues
+    Content extracted from a single page - Enables page-level citations and debug
     """
-
     page_number: int = Field(..., description="1-indexed page number")
     text: str = Field(..., description="Raw text extracted from page")
     tables: List[TableData] = Field(..., description="Tables extracted from page")
-    # images: List[bytes] = Field(default_factory=list, description="Raw image bytes from page")
     word_count: int = Field(0, description="Number of words extracted from page")
     char_count: int = Field(0, description="Number of characters extracted from page")
     has_images: bool = Field(False, description="Whether page contains images")
@@ -111,16 +84,12 @@ class PageContent(BaseModel):
     @classmethod
     def clean_text(cls, v: str) -> str:
         """
-        Clean extracted text.
-
-        Common PDF issues:
-        - Multiple spaces
-        - Weird line breaks
-        - Special characters
+        Clean extracted text like multiple spaces, weird line breaks, special characters
         """
         # Remove multiple spaces
         v = " ".join(v.split())
         return v.strip()
+
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -133,10 +102,9 @@ class PageContent(BaseModel):
 
 class DocumentContent(BaseModel):
     """
-    Complete processed document content.
-
     This is the main output of our document processor.
-    Contains everything needed for RAG pipeline.
+
+    Complete processed document content (everything needed for RAG pipeline).
     """
     # Identification
     document_id: str = Field(..., description="Unique document identifier")
@@ -204,47 +172,10 @@ class DocumentContent(BaseModel):
         }
 
 
-# ==================== API Request/Response Models ====================
-class DocumentUploadResponse(BaseModel):
-    """
-    Response sent to frontend after document upload.
-
-    Separating API models from internal models is good practice:
-    - API can change without affecting internal logic
-    - Can expose only what frontend needs
-    """
-    document_id: str
-    filename: str
-    status: DocumentStatus
-    page_count: int
-    word_count: int
-    table_count: int
-    chunk_count: int
-    uploaded_at: str  # ISO format timestamp
-    message: str = "Document uploaded and processed successfully"
-
-
-class DocumentProcessingError(BaseModel):
-    """
-    Error response when processing fails.
-    """
-    document_id: Optional[str] = None
-    filename: str
-    error: str
-    details: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-
 # ==================== Chunk Models (for RAG) ====================
 class DocumentChunk(BaseModel):
     """
     A chunk of text for embedding and retrieval.
-
-    Why chunk?
-    - Embedding models have token limits (~512 tokens)
-    - Smaller chunks = more precise retrieval
-    - But too small = lose context
-
     Typical chunk size: 500-1000 characters with overlap
     """
     chunk_id: str = Field(..., description="Unique chunk identifier")
@@ -270,3 +201,31 @@ class DocumentChunk(BaseModel):
     @property
     def word_count(self) -> int:
         return len(self.content.split())
+
+
+# ==================== API Request/Response Models ====================
+class DocumentUploadResponse(BaseModel):
+    """
+    API response sent to frontend after document upload.
+    """
+    document_id: str
+    filename: str
+    status: DocumentStatus
+    page_count: int
+    word_count: int
+    table_count: int
+    chunk_count: int
+    uploaded_at: str  # ISO format timestamp
+    message: str = "Document uploaded and processed successfully"
+
+
+
+class DocumentProcessingError(BaseModel):
+    """
+    Error response when processing fails.
+    """
+    document_id: Optional[str] = None
+    filename: str
+    error: str
+    details: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.now)

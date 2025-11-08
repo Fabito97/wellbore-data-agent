@@ -1,23 +1,6 @@
 """
 Text Chunking - Splits documents into embedding-sized pieces.
 
-Why chunking is critical for RAG:
-1. Embedding models have token limits (~512 tokens)
-2. Smaller chunks = more precise retrieval
-3. But too small = lose context
-4. Need overlap to avoid splitting concepts
-
-Teaching Concepts:
-- Sliding window algorithm
-- Trade-offs in chunk size
-- Preserving document structure
-- Metadata propagation
-
-Chunking Strategy:
-- Character-based (simple, predictable)
-- Recursive splitting (smarter, respects structure)
-- Semantic chunking (advanced, groups by meaning)
-
 We'll implement: Recursive Character Splitter (best balance)
 """
 
@@ -35,26 +18,14 @@ logger = get_logger(__name__)
 class ChunkingConfig:
     """
     Configuration for text chunking.
-
-    Teaching: Data Classes
-    - Simpler than full Pydantic for internal-only config
-    - Type hints + default values
-    - Auto-generates __init__, __repr__
-
-    Why these specific values?
-    - chunk_size=1000: Fits in embedding models with room to spare
-    - chunk_overlap=200: 20% overlap prevents concept splitting
-    - separators: Prioritize semantic boundaries (paragraphs > sentences > words)
     """
+    # default=1000: Fits in embedding models with room to spare
     chunk_size: int = settings.CHUNK_SIZE
+
+    # default 200: 20% overlap prevents concept splitting
     chunk_overlap: int = settings.CHUNK_OVERLAP
 
-    # Separator hierarchy: try these in order
-    # Teaching: why this order?
-    # 1. "\n\n" - paragraph breaks (strongest semantic boundary)
-    # 2. "\n" - line breaks
-    # 3. ". " - sentence ends
-    # 4. " " - word boundaries
+    # Separator hierarchy: Prioritize semantic boundaries (paragraphs > sentences > words)
     separators: List[str] = None
 
     def __post_init__(self):
@@ -71,11 +42,9 @@ class ChunkingConfig:
 
 class DocumentChunker:
     """
-    Chunks documents into embedding-ready pieces.
+    Chunks documents into embedding-ready pieces - uses RecursiveCharacterTextSplitter
 
     Design Pattern: Strategy Pattern
-    - Could swap out chunking strategies
-    - Currently uses RecursiveCharacterTextSplitter
     - Could add: SemanticChunker, TokenBasedChunker, etc.
 
     Responsibilities:
@@ -91,16 +60,10 @@ class DocumentChunker:
 
         Args:
             config: Optional custom config, uses defaults if not provided
-
-        Teaching: Dependency Injection
-        - Pass in config rather than hardcode
-        - Easy to test with different configs
-        - Single responsibility: chunking logic only
         """
         self.config = config or ChunkingConfig()
 
         # LangChain's RecursiveCharacterTextSplitter
-        # Teaching: Why "recursive"?
         # - Tries first separator ("\n\n")
         # - If chunk still too big, tries next separator ("\n")
         # - Continues until chunk is right size
@@ -121,24 +84,13 @@ class DocumentChunker:
 
     def chunk_document(self, document: DocumentContent):
         """
-        Chunk a complete document into pieces.
+        Chunk a complete document into pieces (page by page) maintaining tables separately.
 
         Args:
             document: Processed document with text and tables
 
         Returns:
             List of DocumentChunk objects ready for embedding
-
-        Strategy:
-        1. Chunk text content (page by page to preserve structure)
-        2. Chunk tables separately (as markdown for LLM understanding)
-        3. Add metadata to all chunks
-        4. Generate unique IDs
-
-        Teaching: Why page-by-page?
-        - Preserves document structure
-        - Enables page-level citations
-        - Easier to track provenance
         """
         logger.info(f"Chunking document: {document.document_id}")
 
@@ -181,11 +133,6 @@ class DocumentChunker:
         """
          Chunk text from a single page.
 
-         Teaching: Why separate method?
-         - Single Responsibility: just text chunking
-         - Reusable for different contexts
-         - Easier to test in isolation
-
          Process:
          1. Use LangChain splitter to split text
          2. Wrap each piece in DocumentChunk model
@@ -194,8 +141,7 @@ class DocumentChunker:
         if not text or not text.strip():
             return []
 
-        # Split text using recursive splitter
-        # Teaching: This returns List[str]
+        # Split text using recursive splitter - returns List[str]
         text_pieces = self.text_splitter.split_text(text)
 
         chunks = []
@@ -227,44 +173,22 @@ class DocumentChunker:
             start_index: int,
     ) -> List[DocumentChunk]:
         """
-        Create chunks from tables.
-
-        Teaching: Why chunk tables separately?
-
-        Tables are STRUCTURED data:
-        - Have clear boundaries (entire table is a unit)
-        - Converting to markdown preserves structure for LLMs
-        - LLMs trained on markdown understand tables better
-        - Can extract parameters directly from table chunks
-
-        Strategy:
-        - Each table = one chunk (don't split tables)
-        - Convert to markdown format
-        - Add table-specific metadata
-        - If table is huge, could split by rows (future enhancement)
+        Create chunks from tables (Each table = one chunk) with table-specific metadata
         """
         chunks = []
 
         for i, table in enumerate(tables):
-            # Convert table to markdown
-            # Teaching: Why markdown?
-            # - LLMs are trained on markdown tables
-            # - Preserves structure in text format
-            # - Human readable for debugging
+            # Convert table to markdown - LLMs are trained on markdown tables, Preserves structure in text format
             table_markdown = table.to_markdown()
 
-            # Add context header
-            # Teaching: Why add context?
-            # - Helps LLM understand what it's looking at
-            # - Improves retrieval relevance
-            # - Provides metadata in the text itself
+            # Add context header - Helps LLM understand what it's looking at
             content = f"""
-[TABLE from page {page_number}]
-Columns: {', '.join(table.headers)}
-Rows: {table.row_count}
-
-{table_markdown}
-"""
+                    [TABLE from page {page_number}]
+                    Columns: {', '.join(table.headers)}
+                    Rows: {table.row_count}
+                    
+                    {table_markdown}
+                    """
             chunk = DocumentChunk(
                 chunk_id=self._generate_chunk_id(document.document_id, start_index + i),
                 document_id=document.document_id,
@@ -278,7 +202,7 @@ Rows: {table.row_count}
                     "chunk_type": "table",
                     "column_count": table.column_count,
                     "row_count": table.row_count,
-                    "headers": table.headers,
+                    "headers": "| ".join(table.headers) + " |",
                 }
             )
             chunks.append(chunk)
@@ -288,19 +212,7 @@ Rows: {table.row_count}
 
     def _generate_chunk_id(self, document_id: str, chunk_index: int) -> str:
         """
-        Generate unique chunk ID.
-
-        Format: {document_id}_chunk_{index}
-
-        Teaching: Why this format?
-        - Predictable: Easy to reconstruct from parts
-        - Sortable: Chunks sort in document order
-        - Unique: doc_id is unique, index is unique within doc
-        - Debuggable: Can tell doc and position from ID
-
-        Alternative: Could use UUID for every chunk
-        - Pros: Guaranteed unique
-        - Cons: Can't tell anything from the ID
+        Generate unique chunk ID {document_id}_chunk_{index} - Easy to reconstruct from parts
         """
         return f"{document_id}_chunk_{chunk_index}"
 
@@ -312,16 +224,7 @@ Rows: {table.row_count}
             chunk_overlap: int
     ) -> List[str]:
         """
-        Utility: Rechunk text with custom size.
-
-        Use case: Experimentation
-        - Try different chunk sizes
-        - A/B testing retrieval quality
-        - Adapt to different embedding models
-
-        Teaching: Don't Repeat Yourself (DRY)
-        - Could recreate splitter each time
-        - Better: Reuse logic, just change params
+        Utility: Rechunk text with custom size - Adapt to different embedding models
         """
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -340,16 +243,7 @@ def chunk_document(
         chunk_overlap: Optional[int] = None
 ) -> List[DocumentChunk]:
     """
-    Convenience function for quick chunking.
-
-    Teaching: Facade pattern
-    - Simple function for simple use case
-    - Hides complexity of config and classes
-
-    Usage:
-        chunks = chunk_document(doc)
-        # Or with custom size:
-        chunks = chunk_document(doc, chunk_size=500)
+    Convenience function for quick chunking - Hides complexity of config and classes
     """
     config = ChunkingConfig(
         chunk_size=chunk_size or settings.CHUNK_SIZE,
@@ -357,8 +251,3 @@ def chunk_document(
     )
     chunker = DocumentChunker(config)
     return chunker.chunk_document(document)
-
-
-
-
-
