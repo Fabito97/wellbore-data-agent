@@ -37,7 +37,7 @@ from app.models.document import (
 from app.rag.document_processor import process_pdf
 from app.rag.chunking import chunk_document
 from app.rag.embeddings import embed_chunks
-from app.rag.vector_store import get_vector_store
+from app.rag.vector_store_manager import get_vector_store
 from app.core.config import settings
 
 logger = get_logger(__name__)
@@ -47,18 +47,6 @@ logger = get_logger(__name__)
 class DocumentService:
     """
     Service for document management and ingestion.
-
-    Responsibilities:
-    1. Save uploaded files to disk
-    2. Orchestrate RAG pipeline (process → chunk → embed → store)
-    3. Track document status
-    4. Handle errors gracefully
-
-    Teaching: Why a service class?
-    - Encapsulates complex workflow
-    - Single entry point for document operations
-    - Easy to mock for testing
-    - Can maintain state (cache, queues, etc.)
     """
 
     def __init__(self):
@@ -66,8 +54,6 @@ class DocumentService:
         self.vector_store = get_vector_store()
 
         # In-memory document registry (simple for hackathon)
-        # Teaching: For hackathon, in-memory is fine
-        # Production: Use database (PostgreSQL, MongoDB, etc.)
         self._documents: Dict[str, DocumentContent] = {}
 
         logger.info("DocumentService initialized")
@@ -344,11 +330,6 @@ class DocumentService:
     def get_stats(self) -> Dict[str, Any]:
         """
          Get service statistics.
-
-         Useful for:
-         - Monitoring
-         - Dashboard
-         - Capacity planning
          """
         total_docs = len(self._documents)
         total_pages = sum(doc.page_count for doc in self._documents.values())

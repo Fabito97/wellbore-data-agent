@@ -104,9 +104,7 @@ class VectorStore:
 
             try:
                 # Prepare batch data
-                # Teaching: ChromaDB expects parallel lists
-                # Not: [{id, embedding, document}, ...]
-                # But: ids=[...], embeddings=[...], documents=[...]
+                # Eg: ids=[...], embeddings=[...], documents=[...]
                 ids = [chunk.chunk_id for chunk in batch]
                 embeddings = [chunk.embedding for chunk in batch]
                 documents = [chunk.content for chunk in batch]

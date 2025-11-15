@@ -220,7 +220,7 @@ class DocumentProcessor:
                 tables.append(table)
 
                 logger.debug(
-                    f"Extracted table {table_idx} from page {page_number}: {table.summary} "
+                    f"Extracted table {table_idx} from page {page_number}: {table.headers} "
                     f"{table.row_count} rows * {table.column_count} columns"
                 )
 

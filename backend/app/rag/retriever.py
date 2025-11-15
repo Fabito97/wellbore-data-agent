@@ -9,7 +9,7 @@ from app.utils.logger import get_logger
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from app.rag.vector_store import get_vector_store
+from app.rag.vector_store_manager import get_vector_store
 from app.rag.embeddings import embed_query
 from app.core.config import settings
 
@@ -49,9 +49,6 @@ class DocumentRetriever:
     """
     High-level retrieval interface for RAG pipeline.
 
-    This is what the agent uses. Simple API:
-    - retrieve(query) → Get relevant chunks
-    - retrieve_with_filter() → Get specific chunks
     """
 
     def __init__(
@@ -85,6 +82,9 @@ class DocumentRetriever:
         """
         This is the main RAG retrieval method! - Retrieve relevant chunks for a query.
 
+         Process:
+         1. Convert query to embedding - Search vector store - Filter by score threshold - Format results - Return sorted by relevance
+
          Args:
              query: User's question or search query
              top_k: Override default number of results
@@ -92,9 +92,6 @@ class DocumentRetriever:
 
          Returns:
              List of RetrievalResult objects, sorted by relevance
-
-         Process:
-         1. Convert query to embedding - Search vector store - Filter by score threshold - Format results - Return sorted by relevance
          """
         k = top_k or self.top_k
 
@@ -102,16 +99,16 @@ class DocumentRetriever:
 
         try:
             # Search vector store
-            raw_results = self.vector_store.query_by_text(
-                query_text=query,
+            raw_results = self.vector_store.query_similar_chunks(
+                query=query,
                 top_k=k,
-                where=filters,
+                filters=filters,
             )
 
             # Convert to Retrieval Result objects and filter by threshold
             results = []
             for raw in raw_results:
-                similarity = raw.get('similarity', 0.0)
+                similarity = raw.get('similarity_score', 0.0)
 
                 # Filter by threshold
                 if similarity < self.score_threshold:
@@ -155,13 +152,8 @@ class DocumentRetriever:
          Retrieve chunks for document summarization (Sub-challenge 1).
 
          Different from search:
-         - Get chunks from specific document
+         - Get chunks from specific document - Coverage-based (whole document)
          - Order by page/chunk index (not relevance)
-         - Get representative sample from whole document
-
-         Teaching: Different retrieval strategies for different tasks
-         - Search: Relevance-based (user query)
-         - Summarization: Coverage-based (whole document)
          """
         try:
             # Get all chunks from document
@@ -205,16 +197,6 @@ class DocumentRetriever:
     ) -> List[RetrievalResult]:
         """
          Retrieve only table chunks (for parameter extraction).
-
-         Example:
-         ```python
-         # Find tables with well parameters
-         tables = retriever.retrieve_tables_only("depth diameter pressure")
-
-         for table in tables:
-             # Extract parameters from table
-             ...
-         ```
          """
         return self.retrieve(
             query=query,
@@ -231,11 +213,6 @@ class DocumentRetriever:
     ) -> List[RetrievalResult]:
         """
         Retrieve from specific pages only.
-
-        Use case:
-        - User: "Look at page 5"
-        - Agent: Searches only page 5
-        - Faster, more focused
         """
         # ChromaDB filter for page numbers
         # $in operator: match any of the list values
@@ -254,18 +231,7 @@ class DocumentRetriever:
             window_size: int = 2,
     ) -> List[RetrievalResult]:
         """
-        Get surrounding chunks for context.
-
-        Teaching: Context windows in RAG
-
-        Problem:
-        - Retrieved chunk might not have complete info
-        - "...depth is" → Need next chunk: "1500 meters"
-
-        Solution:
-        - Get chunk before and after
-        - Provides fuller context
-        - Like reading paragraph around a sentence
+        Get surrounding chunks for context - Provides fuller context like reading paragraph around a sentence
 
         Example:
         If chunk_index = 10, window_size = 2:

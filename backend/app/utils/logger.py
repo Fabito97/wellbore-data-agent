@@ -1,5 +1,8 @@
 import logging
 
+from app.core.config import settings
+
+
 def get_logger(name: str = "wellbore-agent") -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -8,7 +11,7 @@ def get_logger(name: str = "wellbore-agent") -> logging.Logger:
     if not logger.handlers:
         handler = logging.StreamHandler()
         formatter = logging.Formatter(
-       "%(asctime)s - %(name)s [%(levelname)s]:   %(message)s",
+            settings.LOG_FORMAT,
             datefmt = "%H:%M:%S"  # Only time: HH:MM:SS
         )
         handler.setFormatter(formatter)

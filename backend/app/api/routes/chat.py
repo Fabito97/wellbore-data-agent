@@ -1,12 +1,21 @@
 import time
+from typing import Dict, Any
+
 import httpx
 from fastapi import APIRouter, Form
 from fastapi.responses import StreamingResponse
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi.responses import JSONResponse
+
+from app.agents.simple_agent import SimpleAgent, get_simple_agent
 from ollama import Client
+
+from app.services.llm_service import get_llm_service, LLMProvider
 from app.utils.logger import get_logger
 # client = Client()
 
-router = APIRouter(prefix="/chat", tags=["Agent"])
+router = APIRouter()
 logger = get_logger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -17,24 +26,14 @@ async def handle_chat(query: str = Form(...)):
     try:
         start = time.time()
 
-        payload = {
-            "model": "phi3:mini",
-            "messages": [{"role": "user", "content": query}],
-            "stream": False  # Set to True if you want to stream
-        }
+        service = get_llm_service()
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(OLLAMA_URL, json=payload, timeout=120)
+        messages = [
+            {"role": "user", "content": query}
+        ]
+        response = service.generate(prompt=query)
 
-        if response.status_code != 200:
-            logger.error(f"Ollama error: {response.text}")
-            return {
-                "status": "error",
-                "message": "Failed to generate response from model",
-                "detail": response.text
-            }
-
-        result = response.json()["message"]["content"]
+        result = response.content
         end = time.time()
 
         logger.info(f"Returning response...")
@@ -53,6 +52,53 @@ async def handle_chat(query: str = Form(...)):
             "message": "Internal server error",
             "detail": str(e)
         }
+
+
+@router.post("/ask")
+async def ask_question(
+        question: str,
+        include_sources: bool = True,
+        agent: SimpleAgent = Depends(get_simple_agent)
+):
+    """
+    Simple REST endpoint for Q&A (alternative to WebSocket).
+
+    Args:
+        question: Question to ask
+        include_sources: Include source citations
+        agent: Agent (injected)
+
+    Returns:
+        Answer with optional sources
+    """
+    try:
+        response = agent.answer(question, include_sources=include_sources)
+
+        result: Dict[str, Any] = {
+            "answer": response.answer,
+            "confidence": response.confidence
+        }
+
+        if include_sources:
+            result["sources"] = [
+                {
+                    "citation": s.citation,
+                    "similarity_score": s.similarity_score
+                }
+                for s in response.sources
+            ]
+
+        return {
+            "status": "success",
+            "content": result
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to answer question: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 
 @router.post("/stream")

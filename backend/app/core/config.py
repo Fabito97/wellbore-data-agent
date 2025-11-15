@@ -9,6 +9,7 @@ Philosophy:
 - Development defaults for convenience (localhost, debug mode)
 - All model/API configs MUST come from .env
 """
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     # ==================== Development Defaults ====================
     # Safe defaults for local development
     DEBUG: bool = True
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8000
     LOG_LEVEL: str = "INFO"
 
@@ -70,13 +71,15 @@ class Settings(BaseSettings):
 
     # ==================== LLM Configuration (Ollama) ====================
     # These MUST be set in .env - no defaults
+    LLM_PROVIDER: str = "ollama"
+    # LLM_API_KEY: str = "<KEY>"
     HF_TOKEN: str
     OLLAMA_BASE_URL: str  # e.g., "http://localhost:11434"
     OLLAMA_MODEL: str  # e.g., "phi3:mini"
 
     # LLM parameters - can be tuned via .env
     OLLAMA_TIMEOUT: int = 120
-    LLM_TEMPERATURE: float = 0.1
+    LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
     LLM_TOP_P: float = 0.9
 
@@ -94,7 +97,7 @@ class Settings(BaseSettings):
 
     # Retrieval parameters
     RETRIEVAL_TOP_K: int = 10
-    RETRIEVAL_SCORE_THRESHOLD: float = 0.5
+    RETRIEVAL_SCORE_THRESHOLD: float = 0.4
 
     # ==================== Document Processing ====================
     # Text chunking parameters
@@ -121,9 +124,10 @@ class Settings(BaseSettings):
     WS_MESSAGE_QUEUE_SIZE: int = 100
 
     # ==================== Logging ====================
-    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - [%(levelname)s] - %(message)s"
 
     # ==================== Pydantic Settings ====================
+    BASE_DIR: Path = Path(__file__).resolve().parent.parent
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -167,7 +171,6 @@ class Settings(BaseSettings):
         # Check embedding config
         if not self.EMBEDDING_MODEL:
             errors.append("EMBEDDING_MODEL is required")
-
         # Check nodal API config
         if not self.NODAL_API_URL:
             errors.append("NODAL_API_URL is required")

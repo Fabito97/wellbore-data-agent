@@ -2,6 +2,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.middleware import Middleware
 from fastapi.responses import JSONResponse
+
+from app.core.config import settings
 from app.utils import get_logger
 
 logger = get_logger("error-handler")
@@ -17,7 +19,7 @@ class ErrorMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 content={
                     "error": "Internal Sever Error",
-                    "detail": str(e)
+                    "detail": str(e) if settings.DEBUG else "An unexpected error occurred"
                 }
             )
 

@@ -44,14 +44,7 @@ class DocumentChunker:
     """
     Chunks documents into embedding-ready pieces - uses RecursiveCharacterTextSplitter
 
-    Design Pattern: Strategy Pattern
-    - Could add: SemanticChunker, TokenBasedChunker, etc.
-
-    Responsibilities:
-    - Split text into optimal sizes
-    - Preserve metadata (page numbers, doc IDs)
-    - Handle tables separately (structured data)
-    - Generate unique chunk IDs
+    Others chunking strategies are: SemanticChunker, TokenBasedChunker, etc.
     """
 
     def __init__(self, config: Optional[ChunkingConfig] = None):
@@ -202,7 +195,7 @@ class DocumentChunker:
                     "chunk_type": "table",
                     "column_count": table.column_count,
                     "row_count": table.row_count,
-                    "headers": "| ".join(table.headers) + " |",
+                    "headers": ", ".join(table.headers),
                 }
             )
             chunks.append(chunk)

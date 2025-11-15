@@ -1,62 +1,107 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+"""
+Main FastAPI Application.
 
-from app.api.middleware.cors import setup_middleware
-from app.api.routes import api_router
-import requests
-import time
-from app.api.middleware.error_handler import middleware
+This is the entry point for the backend server.
+It configures and runs the complete API.
+"""
+from fastapi import FastAPI
+import dotenv
+
+from app.api.middleware.cors import setup_cors
+from app.api.routes import api_router, health
+from app.api.middleware.error_handler import ErrorMiddleware, middleware
 from contextlib import asynccontextmanager
-from app.core.config import settings, get_settings
+from app.core.config import settings
+from app.rag.vector_store_manager import get_vector_store
+from app.services.llm_service import LLMProvider
 from app.utils import get_logger
 from app.telemetry.setup import setup_telemetry
 
-setup_telemetry("wellbore-agent")
+dotenv.load_dotenv()
 
 logger = get_logger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    # Startup
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Environment: {'Development' if settings.DEBUG else 'Production'}")
+
+    # Validate services
+    logger.info("Validating services...")
+
+    # Check Ollama connection
+    from app.services.llm_service import get_llm_service
     try:
-        try:
-            response = requests.get("http://localhost:11434")
-            if response.status_code == 200:
-                print("Ollama is running")
-
-        except requests.exceptions.ConnectionError:
-            print("Ollama did not start in time.")
-        yield
-        return
+        llm = get_llm_service()
+        if llm.validate_connection():
+            logger.info(f"✅ LLM service ready (model: {settings.OLLAMA_MODEL})")
+        else:
+            logger.warning("⚠️  LLM service not responding - check Ollama")
     except Exception as e:
-        print(f"Startup error: {e}")
+        logger.error(f"❌ LLM service error: {e}")
 
-    yield
+    # Check vector store
+    from app.rag.vector_store import get_vector_store
+    try:
+        store = get_vector_store()
+        stats = store.get_stats()
+        logger.info(f"✅ Vector store ready ({stats['total_chunks']} chunks indexed)")
+    except Exception as e:
+        logger.error(f"❌ Vector store error: {e}")
+
+    logger.info(f"🚀 Server ready at http://{settings.HOST}:{settings.PORT}")
+
+    yield  # Server runs here
+
+    # Shutdown
+    logger.info("Shutting down gracefully...")
 
 
 # # Create FastAPI app
 app = FastAPI(
     lifespan=lifespan,
     title = settings.APP_NAME,
-    description = "API for wellbore data analysis using AI agents",
+    description = "AI-powered wellbore analysis system using RAG",
     version = settings.APP_VERSION,
-    middleware = middleware
+    debug=settings.DEBUG,
+    middleware=middleware,
 )
 
-# CORS middleware
-setup_middleware(app)
+# Error middleware
+app.add_middleware(ErrorMiddleware)
 
+# CORS middleware
+setup_cors(app)
+
+setup_telemetry("wellbore-agent")
+
+# Routes
+api_router.include_router(health.router, tags=["health"], prefix="")
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
 
 @app.get("/")
 async def root():
-    logger.info(f"Starting {settings.APP_NAME}")
+    """Root endpoint - API information."""
+    logger.info(f"Root responding...")
     return {
-        "message": "Wellbore Data Agent API",
-        "version": "1.0.0",
-        "status": "running"
+        "name": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running",
+        "docs": "/docs",
+        "openapi": "/openapi.json"
     }
 
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "uptime": time.time()}
+if __name__ == "__main__":
+    import uvicorn
 
+    uvicorn.run(
+        "app.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG,  # Auto-reload in dev mode
+        log_level=settings.LOG_LEVEL.lower()
+    )
