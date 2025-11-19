@@ -15,10 +15,10 @@ interface MessageRequest {
   }
 }
 
-const BaseUrl = 'http://127.0.0.1:8000'
+export const BASE_URL = 'http://127.0.0.1:8000'
 export const chatApi = createApi({
   reducerPath: 'chatApi',
-  baseQuery: fetchBaseQuery({ baseUrl: `${BaseUrl}/api/v1` }),
+  baseQuery: fetchBaseQuery({ baseUrl: `${BASE_URL}/api/v1` }),
   tagTypes: ['Conversations', 'Messages'],
   endpoints: (builder) => ({
     getConversations: builder.query<Conversation[], void>({
