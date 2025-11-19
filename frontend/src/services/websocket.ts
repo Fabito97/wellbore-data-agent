@@ -1,11 +1,11 @@
 // src/services/websocket.ts
-import { store } from "../../store/store";
+import { store } from "../store/store";
 import {
   startStreaming,
   appendStreamingContent,
   stopStreaming,
   setError,
-} from "../../store/slice/chatSlice";
+} from "../store/slice/chatSlice";
 import { v4 as uuidv4 } from "uuid";
 
 class WebSocketService {

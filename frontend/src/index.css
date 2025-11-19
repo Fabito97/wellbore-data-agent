@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 /* Define your light theme colors as the default */
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --color-default-background: oklch(0.99 0 0);
@@ -21,8 +22,6 @@
   }
 }
 
-@custom-variant dark (&:where(.dark, .dark *));
-
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
@@ -32,13 +31,15 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-button {
+
+.btn {
+  border: 1px solid transparent;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
   transition: border-color 0.25s;
-  
 }
-
-
 
 button {
   border: 1px solid transparent;
@@ -49,25 +50,33 @@ button {
   transition: border-color 0.25s;
 }
 
-button:hover {
+.btn:hover {
   border-color: #646cff;
 }
 
-button:focus,
+.btn:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
-/*
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
-} */
+.icon:hover {
+  border-radius: 10px;
+  background-color: #444;
+  padding: 2px 4px;
+}
+
+/* Apply to any scrollable container */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: rgba(100, 100, 100, 0.4);
+  border-radius: 10px;
+  border: 1px solid transparent;
+}

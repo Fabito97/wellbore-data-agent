@@ -1,55 +1,56 @@
-// src/features/chat/chatApi.ts
+// features/chat/chatApi.ts
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
+import { Conversation, Message } from '../../types';
 
-interface ChatRequest {
-  message: string;
-  sessionId: string;
+interface MessageRequest {
+  status: 'pending' | 'sent' | 'error' | 'streaming'
+  data: Message
 }
 
-interface ChatResponse {
-  response: string;
-  sessionId: string;
-  metadata?: any;
-}
-
-interface ChatHistory {
-  messages: Array<{
-    role: string;
-    content: string;
-    timestamp: number;
-  }>;
-}
-
+const BaseUrl = 'http://127.0.0.1:8000'
 export const chatApi = createApi({
   reducerPath: 'chatApi',
-  baseQuery: fetchBaseQuery({ baseUrl: 'http://localhost:8000/api' }),
-  tagTypes: ['ChatHistory'],
+  baseQuery: fetchBaseQuery({ baseUrl: `${BaseUrl}/api/v1` }),
+  tagTypes: ['Conversations', 'Messages'],
   endpoints: (builder) => ({
-    sendMessage: builder.mutation<ChatResponse, ChatRequest>({
-      query: (body) => ({
-        url: '/chat',
-        method: 'POST',
-        body,
-      }),
-      invalidatesTags: ['ChatHistory'],
+    getConversations: builder.query<Conversation[], void>({
+      query: () => '/chat',
+      providesTags: ['Conversations'],
     }),
-    
-    getChatHistory: builder.query<ChatHistory, string>({
-      query: (sessionId) => `/sessions/${sessionId}/history`,
-      providesTags: ['ChatHistory'],
+    getMessages: builder.query<Message[], string>({
+      query: (conversationId) => `/chat/${conversationId}/messages`,
+      providesTags: (result, error, id) => [{ type: 'Messages', id }],
     }),
-    
-    createSession: builder.mutation<{ sessionId: string }, void>({
-      query: () => ({
-        url: '/sessions',
+    sendMessage: builder.mutation<MessageRequest, { conversationId?: string; question: string }>({
+      query: ({ conversationId, question }) => ({
+        url: '/chat/ask',
         method: 'POST',
+        body: { conversation_id: conversationId, query: question },
       }),
+      invalidatesTags: ['Conversations'],
+    }),
+    streamMessage: builder.mutation<any, { conversationId?: string; question: string }>({
+      query: ({ conversationId, question }) => ({
+        url: '/chat/stream',
+        method: 'POST',
+        body: { conversation_id: conversationId, question },
+      }),
+    }),
+    deleteConversation: builder.mutation<void, string>({
+      query: (conversationId) => ({
+        url: `/chat/${conversationId}`,
+        method: 'DELETE',
+      }),
+      invalidatesTags: ['Conversations'],
     }),
   }),
 });
 
 export const {
+  useGetConversationsQuery,
+  useGetMessagesQuery,
+  useLazyGetMessagesQuery,
   useSendMessageMutation,
-  useGetChatHistoryQuery,
-  useCreateSessionMutation,
+  useStreamMessageMutation,
+  useDeleteConversationMutation,
 } = chatApi;

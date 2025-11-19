@@ -1,5 +1,5 @@
-button {
-  cursor: pointer;
-  transition: border-color 0.25s;
-  
+.icon:hover {
+  border-radius: 100%;
+  background-color: #444;
+  padding: 5px;
 }

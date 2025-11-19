@@ -1,15 +1,11 @@
 // import React from 'react'
 import Header from "../components/layout/Header";
-import { ChatInterface } from "../features/chat/ChatInterface";
+import { ChatInterface } from "../components/chat/ChatInterface";
 
 const ChatPage = () => {
   return (
-    <div className="relative h-full">
-      <Header />
-
-      {/* Chat Panel */}
+  
       <ChatInterface />
-    </div>
   );
 };
 

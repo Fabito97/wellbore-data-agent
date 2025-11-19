@@ -1,10 +1,8 @@
-// src/app/store.ts
 import { configureStore } from "@reduxjs/toolkit";
 import { setupListeners } from "@reduxjs/toolkit/query";
 import chatReducer from "./slice/chatSlice";
 import documentsReducer from "./slice/documentsSlice";
 import analysisReducer from "./slice/analysisSlice";
-// import validationReducer from '../features/validation/validationSlice';
 import { chatApi } from "./api/chatApi";
 import { documentsApi } from "./api/documentsApi";
 // import { analysisApi } from '../features/analysis/analysisApi';
@@ -14,7 +12,6 @@ export const store = configureStore({
     chat: chatReducer,
     documents: documentsReducer,
     analysis: analysisReducer,
-    // validation: validationReducer,
     // RTK Query reducers
     [chatApi.reducerPath]: chatApi.reducer,
     [documentsApi.reducerPath]: documentsApi.reducer,
