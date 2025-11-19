@@ -1,4 +1,4 @@
-import { ThemeToggle } from "../ThemeToggle";
+import { ThemeToggle } from "./ThemeToggle";
 
 const Header = () => {
   return (
@@ -8,7 +8,9 @@ const Header = () => {
         <h1 className="font-medium text-xl">DAxent</h1>
         <div className="flex gap-3 items-center rounded-full">
           <button className="icon rounded-full p-1">🔍</button>
-          <button title="Add document" className="icon rounded-full p-1">➕</button>
+          <button title="Add document" className="icon rounded-full p-1">
+            ➕
+          </button>
         </div>
         <ThemeToggle />
       </div>

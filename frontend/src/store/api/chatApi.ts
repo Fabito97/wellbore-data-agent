@@ -1,10 +1,18 @@
 // features/chat/chatApi.ts
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react';
-import { Conversation, Message } from '../../types';
+import { Conversation, Message, Role, status } from '../../types';
 
 interface MessageRequest {
   status: 'pending' | 'sent' | 'error' | 'streaming'
-  data: Message
+  data: {
+      id: string;
+      content: string;
+      sender: Role;
+      timestamp: number; // ISO 8601 format
+      conversation_id?: string;
+      isStreaming?: boolean;
+      status?: status;
+  }
 }
 
 const BaseUrl = 'http://127.0.0.1:8000'

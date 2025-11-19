@@ -1,7 +1,11 @@
+import { useEffect, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
-import { navItems } from "../../lib/constants";
-import { useChatContext } from "../../context/ChatContext";
-import PlusIcon from "../ui/icons/PlusIcon";
+import { navItems } from "../lib/constants";
+import { useChatContext } from "../context/ChatContext";
+import AddDocumentModal from "./AddDocumentModal";
+import PlusIcon from "./ui/icons/PlusIcon";
+
+const MAX_TITLE_LENGTH = 30;
 
 const Sidebar = () => {
   const location = useLocation();
@@ -13,19 +17,21 @@ const Sidebar = () => {
     currentConversation,
   } = useChatContext();
   const navigate = useNavigate();
+  const [isDocsModalOpen, setDocsModalOpen] = useState(false);
+  
+  
+  const isChatPage = location.pathname === "/" || location.pathname.startsWith("/chat");
 
- const isRouteActive = (href: string) => {
-  const path = location.pathname.split('/')[1]; // first segment of path
-  const hrefPath = href.split('/')[1];          // first segment of href
+  const isRouteActive = (href: string) => {
+    // Special case: Chat nav uses href === '/' but should match both '/' and '/chat/...'
+    if (href === "/") {
+      return isChatPage;
+    }
 
-  // Special case: Chat nav uses href === '/' but should match both '/' and '/chat/...'
-  if (href === '/') {
-    return path === '' || path === 'chat';
-  }
-
-  // Default case: match first segment
-  return path === hrefPath;
-};
+    // Default case: match first segment
+    return location.pathname === href;
+  };
+    
 
   return (
     <aside
@@ -58,16 +64,18 @@ const Sidebar = () => {
           </button>
 
           <button
-            onClick={() => {
-              startNewConversation();
-              navigate(`/`);
-            }}
+            onClick={() => setDocsModalOpen(true)}
             className="btn w-full rounded-lg border-gray-600 border p-1.5 px-2 bg-gray-700 flex gap-2 items-center"
           >
             <PlusIcon />
             <span className="text-xs ">Add docs</span>
           </button>
         </div>
+
+        <AddDocumentModal
+          isOpen={isDocsModalOpen}
+          onClose={() => setDocsModalOpen(false)}
+        />
 
         {/* Navigation */}
         <div className="flex flex-col my-10">
@@ -111,12 +119,16 @@ const Sidebar = () => {
                     });
                   }}
                   className={`text-xs text-gray-400 pb-2 border-b cursor-pointer ${
-                    conversation.id === conversationId
+                    conversation.id === conversationId && isChatPage
                       ? "text-white border-gray-300 "
                       : "border-[#646cff] hover:border-gray-400 hover:text-gray-300/80"
                   }`}
                 >
-                  <button>{conversation.title}</button>
+                  <button className="text-left">
+                    {conversation.title.length > MAX_TITLE_LENGTH
+                      ? conversation.title.slice(0, MAX_TITLE_LENGTH) + "..."
+                      : conversation.title}
+                  </button>
                 </div>
               ))}
             </div>
