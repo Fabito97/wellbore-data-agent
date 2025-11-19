@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv_wsl/
 env/
 ENV/
 technical_logs/

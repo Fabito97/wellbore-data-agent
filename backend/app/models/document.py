@@ -216,6 +216,7 @@ class DocumentUploadResponse(BaseModel):
     table_count: int
     chunk_count: int
     uploaded_at: str  # ISO format timestamp
+    elapsed_time: float  # Time taken to process in seconds
     message: str = "Document uploaded and processed successfully"
 
 

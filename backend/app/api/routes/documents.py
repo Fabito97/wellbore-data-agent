@@ -4,6 +4,7 @@ Document Management Routes.
 Handles document upload, listing, and deletion.
 All operations are synchronous REST endpoints.
 """
+from pydantic import BaseModel
 
 from app.utils.logger import get_logger
 from pathlib import Path
@@ -24,8 +25,12 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 # ==================== Upload Document ====================
+class DocumentUploadApiResponse(BaseModel):
+    status: str
+    message: str
+    data: DocumentUploadResponse
 
-@router.post("/upload", response_model=DocumentUploadResponse)
+@router.post("/upload", response_model=DocumentUploadApiResponse)
 async def upload_document(
         file: UploadFile = File(..., description="PDF document to upload"),
         service: DocumentService = Depends(get_document_service)
@@ -58,9 +63,7 @@ async def upload_document(
         )
 
     # Create temp file
-    # Teaching: Why temp file?
-    # - Don't load entire file in memory  (don't fill RAM)
-    # - Process from disk (safer for large files)
+    # - Don't fill RAM - Process from disk (safer for large files)
     # - Auto-cleanup with tempfile
     temp_path = None
 
@@ -87,7 +90,11 @@ async def upload_document(
             )
 
         logger.info(f"Document processed successfully: {result.document_id}")
-        return result
+        return DocumentUploadApiResponse(
+            status="success",
+            message=f"Document uploaded and processed successfully in {result.elapsed_time:.2f} seconds",
+            data=result
+        )
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions

@@ -70,15 +70,18 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
   - **Success Response (200)**: `DocumentUploadResponse` model.
     ```json
     {
-      "document_id": "string",
-      "filename": "string",
-      "status": "indexed",
-      "page_count": 0,
-      "word_count": 0,
-      "table_count": 0,
-      "chunk_count": 0,
-      "uploaded_at": "string",
-      "message": "Document uploaded and processed successfully"
+      "status": "success",
+      "message": "Document uploaded and processed successfully",
+      "data": {
+        "document_id": "string",
+        "filename": "string",
+        "status": "indexed",
+        "page_count": 0,
+        "word_count": 0,
+        "table_count": 0,
+        "chunk_count": 0,
+        "uploaded_at": "string"      
+      }
     }
     ```
 
@@ -87,6 +90,7 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
   - **Success Response (200)**:
     ```json
     {
+      "status": "success",
       "total": 0,
       "documents": []
     }

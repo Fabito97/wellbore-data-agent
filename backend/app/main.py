@@ -12,6 +12,7 @@ from app.api.routes import api_router, health
 from app.api.middleware.error_handler import ErrorMiddleware, middleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
+from app.core.database import create_db_and_tables
 from app.rag.vector_store_manager import get_vector_store
 from app.services.llm_service import LLMProvider
 from app.utils import get_logger
@@ -27,6 +28,9 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {'Development' if settings.DEBUG else 'Production'}")
+
+    # Initialize database
+    create_db_and_tables()
 
     # Validate services
     logger.info("Validating services...")

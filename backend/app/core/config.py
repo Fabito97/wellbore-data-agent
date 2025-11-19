@@ -3,29 +3,41 @@ Core configuration for the Wellbore AI Agent application.
 
 This module centralizes all application settings using Pydantic for type safety
 and validation. Settings are loaded from environment variables.
-
-Philosophy:
-- Only hardcode truly universal constants (app name, version)
-- Development defaults for convenience (localhost, debug mode)
-- All model/API configs MUST come from .env
 """
 import os
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Optional
 
-
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
-
-    Required settings (no defaults) will raise ValidationError if not in .env
-    Optional settings have sensible defaults for local development.
     """
+    # ... (existing settings)
 
-    # ==================== Application Constants ====================
-    # These rarely/never change - safe to hardcode
+    # ==================== Database Configuration (SQLite) ====================
+    DATABASE_URL: str = f"sqlite:///'data' / 'wellbore_agent.db'"
+
+    # ==================== Pydantic Settings ====================
+    BASE_DIR: Path = Path(__file__).resolve().parent.parent
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore"
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Set default for DATABASE_URL if not provided
+        if 'DATABASE_URL' not in kwargs:
+            self.DATABASE_URL = f"sqlite:///{self.DATA_DIR / 'wellbore_agent.db'}"
+        self._create_directories()
+
+    # ... (the rest of the existing file)
+    # ...
+    # Make sure to copy the rest of the file content here
+    # ...
     APP_NAME: str = "Wellbore AI Agent"
     APP_VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api/v1"
@@ -40,6 +52,8 @@ class Settings(BaseSettings):
     # CORS - Development default
     CORS_ORIGINS: list[str] = [
         "http://localhost:3000",
+        "http://localhost:8000",
+        "http://localhost:8000",
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
@@ -125,19 +139,6 @@ class Settings(BaseSettings):
 
     # ==================== Logging ====================
     LOG_FORMAT: str = "%(asctime)s - %(name)s - [%(levelname)s] - %(message)s"
-
-    # ==================== Pydantic Settings ====================
-    BASE_DIR: Path = Path(__file__).resolve().parent.parent
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-        extra="ignore"
-    )
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._create_directories()
 
     def _create_directories(self) -> None:
         """Create necessary directories on initialization."""

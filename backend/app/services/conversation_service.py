@@ -1,100 +1,163 @@
-
 """
-Conversation Service - Manages conversation history.
-
-This service is responsible for storing and retrieving the history of messages
-for each conversation. It acts as the single source of truth for what has
-been said in a conversation.
-
-This implementation uses a simple in-memory dictionary, which is suitable for
-development and testing. For production, this should be replaced with a
-persistent storage backend like Redis, PostgreSQL, or MongoDB.
+Conversation Service - Manages conversation history in the database.
 """
-
-import logging
-from typing import List, Dict, Optional
-from collections import defaultdict
-import uuid
-
-from app.models.message import Message
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+from app.utils.logger import get_logger
+import uuid
+from typing import List, Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+from fastapi import Depends, HTTPException
+
+from app.core.database import Conversation, Message, get_db
+from app.services.llm_service import LLMService, get_llm_service
+from app.models.message import Message as PydanticMessage
+
+logger = get_logger(__name__)
 
 class ConversationService:
     """
-    Manages the lifecycle of conversations.
+    Manages the lifecycle of conversations in a persistent database with robust
+    logging and error handling.
     """
-    def __init__(self):
-        # In-memory storage for conversations.
-        # The key is the conversation_id (str), and the value is a list of Messages.
-        # A defaultdict simplifies the logic for creating new conversations.
-        self._histories: Dict[str, List[Message]] = defaultdict(list)
-        logger.info("ConversationService initialized with in-memory storage.")
+    def __init__(self, db_session: Session, llm_service: LLMService):
+        self.db = db_session
+        self.llm = llm_service
+        logger.debug("ConversationService initialized with database session.")
 
-    def get_history(self, conversation_id: str) -> List[Message]:
+    def get_or_create_conversation(self, conversation_id: Optional[str] = None) -> Conversation:
         """
-        Retrieve the message history for a given conversation.
-
-        Args:
-            conversation_id: The unique identifier for the conversation.
-
-        Returns:
-            A list of Message objects, or an empty list if the conversation is new.
+        Retrieves an existing conversation or creates a new one.
         """
-        logger.debug(f"Retrieving history for conversation_id: {conversation_id}")
-        return self._histories[conversation_id]
+        try:
+            if conversation_id:
+                stmt = select(Conversation).where(Conversation.id == conversation_id)
+                conversation = self.db.execute(stmt).scalar_one_or_none()
+                if conversation:
+                    logger.debug(f"Found existing conversation: {conversation_id}")
+                    return conversation
+            
+            new_id = conversation_id or str(uuid.uuid4())
+            new_conversation = Conversation(id=new_id, title="New Conversation")
+            self.db.add(new_conversation)
+            self.db.commit()
+            self.db.refresh(new_conversation)
+            logger.info(f"Created new conversation: {new_id}")
+            return new_conversation
+        except Exception as e:
+            logger.error(f"Database error in get_or_create_conversation: {e}", exc_info=True)
+            self.db.rollback()
+            raise HTTPException(status_code=500, detail="Database operation failed.")
 
     def add_message(self, conversation_id: str, sender: str, content: str) -> Message:
         """
-        Add a new message to a conversation's history.
-
-        Args:
-            conversation_id: The ID of the conversation.
-            sender: The role of the message sender (e.g., 'user', 'assistant').
-            content: The text content of the message.
-
-        Returns:
-            The newly created Message object.
+        Adds a new message and updates the parent conversation's timestamp.
         """
-        if not conversation_id:
-            raise ValueError("conversation_id cannot be empty.")
+        try:
+            conversation = self.db.get(Conversation, conversation_id)
+            if conversation:
+                conversation.updated_at = func.now()
+            
+            db_message = Message(
+                id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                sender=sender,
+                content=content
+            )
+            self.db.add(db_message)
+            self.db.commit()
+            self.db.refresh(db_message)
+            logger.debug(f"Added message from '{sender}' to conversation {conversation_id}")
+            return db_message
+        except Exception as e:
+            logger.error(f"Database error in add_message for conversation {conversation_id}: {e}", exc_info=True)
+            self.db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to save message.")
 
-        new_message = Message(
-            message_id=str(uuid.uuid4()),
-            conversation_id=conversation_id,
-            sender=sender,
-            content=content,
-            timestamp=datetime.now()
-        )
-        
-        self._histories[conversation_id].append(new_message)
-        logger.debug(f"Added message from '{sender}' to conversation_id: {conversation_id}")
-        return new_message
-
-    def clear_history(self, conversation_id: str):
+    def get_history(self, conversation_id: str) -> List[PydanticMessage]:
         """
-        Clear the history of a specific conversation.
-
-        Args:
-            conversation_id: The ID of the conversation to clear.
+        Retrieves the message history for a conversation from the database.
         """
-        if conversation_id in self._histories:
-            del self._histories[conversation_id]
-            logger.info(f"Cleared history for conversation_id: {conversation_id}")
+        try:
+            stmt = (select(Message)
+                    .where(Message.conversation_id == conversation_id)
+                    .order_by(Message.timestamp))
+            db_messages = self.db.execute(stmt).scalars().all()
+            logger.debug(f"Retrieved {len(db_messages)} messages for conversation {conversation_id}")
+            return [PydanticMessage.from_orm(msg) for msg in db_messages]
+        except Exception as e:
+            logger.error(f"Database error in get_history for conversation {conversation_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
 
-# ==================== Module-level instance ====================
+    def generate_title_if_needed(self, conversation: Conversation):
+        """
+        Generates a title for a conversation if it's new, with error handling.
+        """
+        try:
+            self.db.refresh(conversation)
+            if conversation.title == "New Conversation" and len(conversation.messages) >= 2:
+                logger.info(f"Attempting to generate title for conversation: {conversation.id}")
+                
+                user_message = conversation.messages[0].content
+                assistant_message = conversation.messages[1].content
+                
+                prompt = (f"Based on this exchange, create a short title (4-6 words):"
+                          f"\nUser: \"{user_message}\"\nAssistant: \"{assistant_message}\"\nTitle:")
+                
+                title_messages = [PydanticMessage(
+                    sender="user", content=prompt,
+                    conversation_id=conversation.id,
+                    id=str(uuid.uuid4()),
+                    timestamp=datetime.now()
+                )]
+                response = self.llm.generate(messages=title_messages, system_prompt="You are a title generator.")
+                
+                new_title = response.content.strip().strip('"')
+                conversation.title = new_title
+                self.db.commit()
+                logger.info(f"Successfully generated title for conversation {conversation.id}: '{new_title}'")
+        except Exception as e:
+            # Log the error but don't crash the request. Title generation is non-critical.
+            logger.error(f"LLM or DB error during title generation for conversation {conversation.id}: {e}", exc_info=True)
+            self.db.rollback()
 
-# Create a single, module-level instance of the service.
-# This singleton pattern ensures that all parts of the application
-# share the same conversation history data (in this in-memory case).
-_conversation_service_instance: Optional[ConversationService] = None
+    def get_all_conversations(self) -> List[Conversation]:
+        """Returns all conversations, sorted by the most recently updated."""
+        try:
+            stmt = select(Conversation).order_by(Conversation.updated_at.desc())
+            conversations = self.db.execute(stmt).scalars().all()
+            logger.debug(f"Retrieved {len(conversations)} conversations.")
+            return list(conversations)
+        except Exception as e:
+            logger.error(f"Database error in get_all_conversations: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to retrieve conversations.")
 
-def get_conversation_service() -> ConversationService:
+    def delete_conversation(self, conversation_id: str) -> bool:
+        """
+        Deletes a conversation and all its messages.
+        """
+        try:
+            conversation = self.db.get(Conversation, conversation_id)
+            if conversation:
+                self.db.delete(conversation)
+                self.db.commit()
+                logger.info(f"Deleted conversation {conversation_id}")
+                return True
+            logger.warning(f"Attempted to delete non-existent conversation {conversation_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Database error in delete_conversation for conversation {conversation_id}: {e}", exc_info=True)
+            self.db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to delete conversation.")
+
+# ==================== FastAPI Dependency ====================
+
+def get_conversation_service(
+        db: Session = Depends(get_db),
+        llm_service: LLMService = Depends(get_llm_service)
+) -> ConversationService:
     """
-    Get the singleton instance of the ConversationService.
+    FastAPI dependency to get an instance of the ConversationService.
     """
-    global _conversation_service_instance
-    if _conversation_service_instance is None:
-        _conversation_service_instance = ConversationService()
-    return _conversation_service_instance
+    return ConversationService(db_session=db, llm_service=llm_service)

@@ -1,11 +1,26 @@
+"""
+Pydantic model for a Message.
+"""
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
 
 class Message(BaseModel):
-    message_id: str
-    session_id: str
-    sender: str                  # 'user' or 'assistant'
+    """
+    Represents a single message in a conversation.
+    """
+    id: str
+    conversation_id: str
+    sender: str
     content: str
     timestamp: datetime
-    source: Optional[str] = None # e.g. 'chat', 'tool', 'api'
+
+    class Config:
+        """
+        Pydantic configuration.
+        
+        from_attributes (formerly orm_mode) allows the model to be created
+        from arbitrary class instances (like SQLAlchemy models) by reading
+        their attributes, not just from dictionaries.
+        """
+        from_attributes = True

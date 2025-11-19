@@ -2,25 +2,23 @@
 """
 LLM Service - Unified interface for multiple LLM providers.
 
-This service provides a clean, typed interface to interact with various LLMs:
-- Ollama (local, default)
-- OpenAI (GPT-3.5, GPT-4)
-- Anthropic (Claude)
-- Azure OpenAI
-- Any LangChain-compatible provider
+This service is STATELESS. It does not store conversation history.
+Its only job is to execute a call to an LLM with a given context.
 """
 
 import logging
+import uuid
+from datetime import datetime
 from typing import Optional, Dict, Any, Iterator, List
 from enum import Enum
 from dataclasses import dataclass
 import json
 
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
 from app.core.config import settings
+from app.models.message import Message
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +49,7 @@ class LLMProvider(str, Enum):
 
 
 class LLMService:
-    """Unified service for interacting with various LLM providers.  """
+    """Stateless service for interacting with various LLM providers."""
     def __init__(
             self,
             provider: LLMProvider = LLMProvider.OLLAMA,
@@ -60,41 +58,26 @@ class LLMService:
             api_key: Optional[str] = None,
             base_url: Optional[str] = None
     ):
-        """
-        Initialize LLM service with selected provider.
-
-        Args:
-            provider: Which LLM provider to use
-            model: Model name (provider-specific)
-            temperature: Sampling temperature
-            api_key: API key for cloud providers
-            base_url: Custom endpoint URL
-        """
         self.provider = provider or settings.LLM_PROVIDER
         self.model = model or self._get_default_model(provider)
         self.temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
         self.api_key = api_key if api_key is not None else settings.HF_TOKEN
         self.base_url = base_url or self._get_default_base_url(provider)
 
-        # Initialize provider-specific client
         self.llm = self._initialize_provider()
-
         logger.info(
             f"LLMService initialized: provider={provider.value}, "
             f"model={self.model}, temperature={self.temperature}"
         )
 
     def _get_default_model(self, provider: LLMProvider) -> str:
-        """Get default model for provider."""
         defaults = {
             LLMProvider.OLLAMA: settings.OLLAMA_MODEL,
             LLMProvider.HUGGINGFACE: "microsoft/Phi-3-mini-4k-instruct"
-            # LLMProvider.HUGGINGFACE: "microsoft/phi-2"
         }
         return defaults.get(provider, "")
 
     def _get_default_base_url(self, provider: LLMProvider) -> str:
-        """Get default base URL for provider."""
         defaults = {
             LLMProvider.OLLAMA: settings.OLLAMA_BASE_URL,
             LLMProvider.HUGGINGFACE: None
@@ -107,109 +90,85 @@ class LLMService:
             from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
             import torch
         except ImportError:
-            raise ImportError(
-                "HuggingFace support requires: "
-                "pip install langchain-huggingface transformers torch"
-            )
+            raise ImportError("HuggingFace support requires: pip install langchain-huggingface transformers torch")
 
         logger.info(f"Loading HuggingFace model: {self.model}")
-        logger.info("⚠️  First run will download model (~2GB). This may take a few minutes.")
-
-        # Load tokenizer and model - Downloads from HuggingFace Hub and cached in ~/.cache/huggingface/
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.model,
-            trust_remote_code=True  # Some models need this
-        )
-
-        logger.info("Loading huggingface model. This will will take a few minutes.")
+        tokenizer = AutoTokenizer.from_pretrained(self.model, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             self.model,
-            torch_dtype=torch.float32,  # CPU requires float32
-            device_map=settings.EMBEDDING_DEVICE,  # Force CPU (hackathon constraint)
+            torch_dtype=torch.float32,
+            device_map=settings.EMBEDDING_DEVICE,
             trust_remote_code=True,
-            low_cpu_mem_usage=True,  # Memory optimization
+            low_cpu_mem_usage=True,
         )
-
-        # Ensure pad token is set
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
-
-        # Create pipeline - Handles tokenization, generation, decoding
 
         pipe = pipeline(
             "text-generation",
             model=model,
             tokenizer=tokenizer,
-            max_new_tokens=settings.LLM_MAX_TOKENS,  # max_new_tokens: How much to generate
+            max_new_tokens=settings.LLM_MAX_TOKENS,
             temperature=self.temperature,
-            do_sample=True if self.temperature > 0 else False,  # do_sample: Enable sampling (vs greedy)
+            do_sample=self.temperature > 0,
             top_p=settings.LLM_TOP_P
         )
-
-        # Wrap in LangChain interface
         return HuggingFacePipeline(pipeline=pipe)
 
     def _initialize_provider(self):
-        """Initialize the appropriate LangChain chat model."""
-        if self.provider == LLMProvider.OLLAMA or settings.OLLAMA_MODEL == str(LLMProvider.OLLAMA):
+        if self.provider == LLMProvider.OLLAMA:
             return ChatOllama(
                 model=self.model,
                 base_url=self.base_url,
                 temperature=self.temperature,
                 num_ctx=settings.LLM_MAX_TOKENS,
             )
-
-        elif self.provider == LLMProvider.HUGGINGFACE or settings.LLM_PROVIDER == str(LLMProvider.HUGGINGFACE):
-            # Direct HuggingFace transformers (fully local)
+        elif self.provider == LLMProvider.HUGGINGFACE:
             return self._initialize_huggingface_provider()
-
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
+    def _to_langchain_messages(self, messages: List[Message]) -> List[BaseMessage]:
+        """Convert our Message model to LangChain's message types."""
+        lc_messages = []
+        for msg in messages:
+            if msg.sender.lower() == "user":
+                lc_messages.append(HumanMessage(content=msg.content))
+            elif msg.sender.lower() == "assistant":
+                lc_messages.append(AIMessage(content=msg.content))
+            elif msg.sender.lower() == "system":
+                lc_messages.append(SystemMessage(content=msg.content))
+        return lc_messages
 
     def generate(
             self,
-            prompt: str,
+            messages: Optional[List[Message]],
             system_prompt: Optional[str] = None,
             temperature: Optional[float] = None,
-            max_tokens: Optional[int] = None
     ) -> LLMResponse:
         """
-        Generate a response from the LLM.
+        Generate a response from the LLM based on a list of messages.
 
         Args:
-            prompt: User's input/question
-            system_prompt: System instructions (optional)
-            temperature: Override default temperature
-            max_tokens: Max tokens to generate
+            messages: The history of messages in the conversation.
+            system_prompt: System instructions (optional, prepended to messages).
+            temperature: Override default temperature.
 
         Returns:
-            LLMResponse with generated text
+            LLMResponse with the generated text.
         """
         try:
-            # Build messages
-            messages = []
-
+            lc_messages = self._to_langchain_messages(messages)
             if system_prompt:
-                messages.append(SystemMessage(content=system_prompt))
+                lc_messages.insert(0, SystemMessage(content=system_prompt))
 
-            messages.append(HumanMessage(content=prompt))
-
-            # Override temperature if provided
             llm = self.llm
             if temperature is not None:
                 llm = self.llm.bind(temperature=temperature)
 
-            # Generate response
-            logger.debug(f"Generating response for prompt: {prompt[:100]}...")
-
-            response = llm.invoke(messages)
-
-            # Extract content
+            logger.debug(f"Generating response for {len(lc_messages)} messages...")
+            response = llm.invoke(lc_messages)
             content = response.content
-
-            # Token usage (if available)
-            # Note: Ollama doesn't always provide token counts
             token_usage = getattr(response, 'response_metadata', {}).get('token_usage', {})
 
             result = LLMResponse(
@@ -219,61 +178,39 @@ class LLMService:
                 completion_tokens=token_usage.get('completion_tokens'),
                 total_tokens=token_usage.get('total_tokens')
             )
-
             logger.debug(f"Response generated: {len(content)} chars")
-
             return result
 
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             raise
 
-
-    def generate_with_context(
+    def stream_generate(
             self,
-            question: str,
-            context: str,
+            messages: List[Message],
             system_prompt: Optional[str] = None
-    ) -> LLMResponse:
+    ) -> Iterator[str]:
         """
-        Generate response with provided context (RAG pattern).
+        Stream response token by token.
 
         Args:
-            question: User's question
-            context: Retrieved context from documents
-            system_prompt: Optional system instructions
+            messages: The history of messages in the conversation.
+            system_prompt: Optional system instructions.
 
-        Returns:
-            LLMResponse with answer
+        Yields:
+            String tokens as they're generated.
         """
-        # Default system prompt for RAG
-        if system_prompt is None:
-            system_prompt = """You are a helpful AI assistant specialized in petroleum engineering and well analysis.
-                            
-                            Your task is to answer questions based ONLY on the provided context from well documents.
-                            
-                            Rules:
-                            1. Answer only using information from the context
-                            2. If the answer is not in the context, say "I cannot find this information in the provided documents"
-                            3. Cite the source (document name and page number) when possible
-                            4. Be concise and factual
-                            5. If you're unsure, say so
-                            
-                            Context format: [Document name, Page X]
-                            This shows where each piece of information comes from."""
+        lc_messages = self._to_langchain_messages(messages)
+        if system_prompt:
+            lc_messages.insert(0, SystemMessage(content=system_prompt))
 
-        # Format prompt with context - Clear separation
-        prompt = f"""Context from documents:
-                
-                {context}
-                
-                ---
-                
-                Question: {question}
-                
-                Answer based on the context above:"""
-
-        return self.generate(prompt=prompt, system_prompt=system_prompt)
+        try:
+            for chunk in self.llm.stream(lc_messages):
+                if hasattr(chunk, 'content'):
+                    yield chunk.content
+        except Exception as e:
+            logger.error(f"Streaming failed: {e}")
+            raise
 
 
     def generate_structured(
@@ -297,10 +234,10 @@ class LLMService:
         schema_str = json.dumps(schema, indent=2)
 
         full_system = f"""Extract information and return it as valid JSON.
-                    
+
                     Output schema:
                     {schema_str}
-                    
+
                     Rules:
                     1. Return ONLY valid JSON, no other text
                     2. Use null for missing values
@@ -310,8 +247,17 @@ class LLMService:
         if system_prompt:
             full_system = system_prompt + "\n\n" + full_system
 
+        messages: List[Message] = [
+            Message(
+            id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            sender="user",
+            content=prompt,
+            timestamp=datetime.now()
+            )
+        ]
         # Generate response
-        response = self.generate(prompt=prompt, system_prompt=full_system)
+        response = self.generate(messages=messages, system_prompt=full_system)
 
         # Parse JSON - LLMs sometimes add markdown fences: ```json ... ```
         #
@@ -331,7 +277,6 @@ class LLMService:
             logger.error(f"Failed to parse JSON response: {e}")
             logger.error(f"Raw response: {response.content}")
             raise ValueError(f"LLM did not return valid JSON: {e}")
-
 
     def chat(
             self,
@@ -373,57 +318,29 @@ class LLMService:
             model=self.model
         )
 
-
-    def stream_generate(
-            self,
-            prompt: str,
-            system_prompt: Optional[str] = None
-    ) -> Iterator[str]:
-        """
-        Stream response token by token - Tokens appear as generated (immediate feedback)
-
-        Args:
-            prompt: User's input
-            system_prompt: Optional system instructions
-
-        Yields:
-            String tokens as they're generated
-        """
-        messages = []
-
-        if system_prompt:
-            messages.append(SystemMessage(content=system_prompt))
-
-        messages.append(HumanMessage(content=prompt))
-
-        try:
-            for chunk in self.llm.stream(messages):
-                # Each chunk is a message delta
-                if hasattr(chunk, 'content'):
-                    yield chunk.content
-
-        except Exception as e:
-            logger.error(f"Streaming failed: {e}")
-            raise
-
     def validate_connection(self) -> bool:
         """
-        Test if Ollama is accessible and model is available.
-
-        Returns:
-            True if LLM is ready, False otherwise
+        Test if the LLM is accessible and responsive.
         """
         try:
-            # Simple test prompt
-            response = self.generate(
-                prompt="Hello",
-                system_prompt="Respond with 'Hi'"
-            )
-
-            return len(response.content) > 0
+            logger.debug("Validating LLM connection...")
+            # Construct a minimal list of messages for the LLM call
+            test_messages = [
+                SystemMessage(content="Respond with only the word 'Hi'"),
+                HumanMessage(content="Hello")
+            ]
+            response = self.llm.invoke(test_messages)
+            
+            # Check if the response content is not empty and is a string
+            is_valid = isinstance(response.content, str) and len(response.content) > 0
+            if is_valid:
+                logger.info("LLM connection validation successful.")
+            else:
+                logger.warning("LLM validation failed: received empty or invalid response.")
+            return is_valid
 
         except Exception as e:
-            logger.error(f"LLM validation failed: {e}")
+            logger.error(f"LLM validation failed with exception: {e}", exc_info=True)
             return False
 
 
@@ -431,37 +348,29 @@ class LLMService:
 
 _llm_service_instance: Optional[LLMService] = None
 
-
 def get_llm_service(
-        provider: Optional[LLMProvider] = LLMProvider.OLLAMA,
+        provider: Optional[LLMProvider] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
-
 ) -> LLMService:
     """
-    Get or create LLM service instance - Use Ollama (default)
-
-    Args:
-        provider: Which LLM provider
-        model: Optional model override
-
-    Returns:
-        Configured LLM service
+    Get a configured instance of the LLM service.
+    For non-default providers, this will always create a new instance.
+    The default provider instance is cached as a singleton.
     """
     global _llm_service_instance
-    llm_provider =  provider or LLMProvider(settings.LLM_PROVIDER)
-    print(f"Using {str(llm_provider)} to process user requests")
 
-    if provider != (LLMProvider.OLLAMA or model is not None) and api_key is not None:
-        return LLMService(provider=provider, model=model, api_key=api_key)
+    # Determine the provider from arguments or settings
+    llm_provider: LLMProvider = provider or settings.LLM_PROVIDER
 
+    # If a non-default configuration is requested, create a new instance
+    if llm_provider != LLMProvider.OLLAMA or model or api_key:
+        logger.info(f"Creating new LLMService instance for provider={llm_provider.value}")
+        return LLMService(provider=llm_provider, model=model, api_key=api_key)
 
-    # For non-default providers, always create new instance
-    if provider != LLMProvider.OLLAMA or model is not None:
-        return LLMService(provider=llm_provider, model=model)
-
-    # For default (Ollama), use singleton
+    # Otherwise, use the cached singleton for the default provider
     if _llm_service_instance is None:
-        _llm_service_instance = LLMService(provider=llm_provider)
+        logger.info("Creating singleton LLMService instance for default provider.")
+        _llm_service_instance = LLMService(provider=LLMProvider.OLLAMA)
 
     return _llm_service_instance
