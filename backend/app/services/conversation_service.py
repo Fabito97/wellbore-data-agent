@@ -39,12 +39,15 @@ class ConversationService:
                     return conversation
             
             new_id = conversation_id or str(uuid.uuid4())
-            new_conversation = Conversation(id=new_id, title="New Conversation")
+            new_conversation = Conversation(id=new_id, title="New Chat")
+
             self.db.add(new_conversation)
             self.db.commit()
             self.db.refresh(new_conversation)
+
             logger.info(f"Created new conversation: {new_id}")
             return new_conversation
+
         except Exception as e:
             logger.error(f"Database error in get_or_create_conversation: {e}", exc_info=True)
             self.db.rollback()
@@ -65,11 +68,14 @@ class ConversationService:
                 sender=sender,
                 content=content
             )
+
             self.db.add(db_message)
             self.db.commit()
             self.db.refresh(db_message)
+
             logger.debug(f"Added message from '{sender}' to conversation {conversation_id}")
             return db_message
+
         except Exception as e:
             logger.error(f"Database error in add_message for conversation {conversation_id}: {e}", exc_info=True)
             self.db.rollback()
@@ -83,9 +89,12 @@ class ConversationService:
             stmt = (select(Message)
                     .where(Message.conversation_id == conversation_id)
                     .order_by(Message.timestamp))
+
             db_messages = self.db.execute(stmt).scalars().all()
+
             logger.debug(f"Retrieved {len(db_messages)} messages for conversation {conversation_id}")
             return [PydanticMessage.from_orm(msg) for msg in db_messages]
+
         except Exception as e:
             logger.error(f"Database error in get_history for conversation {conversation_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to retrieve message history.")
@@ -111,12 +120,14 @@ class ConversationService:
                     id=str(uuid.uuid4()),
                     timestamp=datetime.now()
                 )]
-                response = self.llm.generate(messages=title_messages, system_prompt="You are a title generator.")
+
+                response = self.llm.generate(messages=title_messages, system_prompt="You are a title generator for conversations.")
                 
                 new_title = response.content.strip().strip('"')
                 conversation.title = new_title
                 self.db.commit()
                 logger.info(f"Successfully generated title for conversation {conversation.id}: '{new_title}'")
+
         except Exception as e:
             # Log the error but don't crash the request. Title generation is non-critical.
             logger.error(f"LLM or DB error during title generation for conversation {conversation.id}: {e}", exc_info=True)
@@ -127,8 +138,10 @@ class ConversationService:
         try:
             stmt = select(Conversation).order_by(Conversation.updated_at.desc())
             conversations = self.db.execute(stmt).scalars().all()
+
             logger.debug(f"Retrieved {len(conversations)} conversations.")
             return list(conversations)
+
         except Exception as e:
             logger.error(f"Database error in get_all_conversations: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail="Failed to retrieve conversations.")
@@ -142,10 +155,13 @@ class ConversationService:
             if conversation:
                 self.db.delete(conversation)
                 self.db.commit()
+
                 logger.info(f"Deleted conversation {conversation_id}")
                 return True
+
             logger.warning(f"Attempted to delete non-existent conversation {conversation_id}")
             return False
+
         except Exception as e:
             logger.error(f"Database error in delete_conversation for conversation {conversation_id}: {e}", exc_info=True)
             self.db.rollback()

@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from app.models.document import DocumentChunk
+from app.utils.helper import normalize_score
 from app.utils.logger import get_logger
 from app.core.config import settings
 
@@ -104,11 +105,11 @@ class VectorStoreManager:
 
         # Format results
         formatted = []
-        for doc, score in results:
+        for doc, distance in results:
             formatted.append({
                 "content": doc.page_content,
                 "metadata": doc.metadata,
-                "similarity_score": 1 - score,  # Convert distance to similarity
+                "similarity_score": 1 - distance # normalize_score(distance),  # Convert distance to similarity
                 "chunk_id": doc.metadata.get("chunk_id", "")
             })
 
@@ -148,8 +149,7 @@ class VectorStoreManager:
     def get_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         """Get chunk by ID."""
         try:
-            collection = self.vector_store._collection
-            results = collection.get(ids=[chunk_id])
+            results = self.collection.get(ids=[chunk_id])
 
             if not results or not results['ids']:
                 return None

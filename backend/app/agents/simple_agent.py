@@ -15,7 +15,7 @@ from app.services.conversation_service import get_conversation_service, Conversa
 from app.rag.retriever import get_retriever, DocumentRetriever, RetrievalResult
 from app.core.config import settings
 from app.models.message import Message
-from app.utils.prompts import SYSTEM_PROMPT
+from app.utils.prompts import system_prompt
 
 logger = get_logger(__name__)
 
@@ -84,27 +84,29 @@ class SimpleAgent:
         # 3. Retrieve documents
         retrieved = self.retriever.retrieve(query=question, top_k=self.top_k, filters=filters)
         if not retrieved:
-            answer_text = "I couldn't find any relevant information in the documents to answer your question."
-            self.conversations.add_message(conversation.id, "assistant", answer_text)
-            return AgentResponse(answer=answer_text, sources=[], confidence="low", conversation_id=conversation.id)
+            retrieved = "No relevant information could be found in the documents to for the query."
+            # self.conversations.add_message(conversation.id, "assistant", answer_text)
+            # return AgentResponse(answer=answer_text, sources=[], confidence="low", conversation_id=conversation.id)
 
+        context = "No context found for the query."
         # 4. Construct Prompt
-        context = self.retriever.format_context_for_llm(retrieved, max_tokens=self.max_context_tokens)
-        prompt_with_context = f""" Context from documents:\n{context}\n---
-                                \nQuestion: {question}\nAnswer based on the context above:"""
-        
+        if retrieved:
+            context = self.retriever.format_context_for_llm(retrieved, max_tokens=self.max_context_tokens)
+
+        prompt_with_context = system_prompt(question=question, context=context)
+
         # Get full history from DB for the LLM call
         history = self.conversations.get_history(conversation.id)
 
         # 5. Generate Answer
         try:
-            llm_response = self.llm.generate(messages=history, system_prompt=SYSTEM_PROMPT)
+            llm_response = self.llm.generate(messages=history, system_prompt= prompt_with_context)
             
             # 6. Save Assistant's Response and Finalize
             self.conversations.add_message(conversation.id, "assistant", llm_response.content)
             
             # 7. Generate title if it's a new conversation
-            self.conversations.generate_title_if_needed(conversation)
+            # self.conversations.generate_title_if_needed(conversation)
 
             confidence = self._assess_confidence(retrieved)
             

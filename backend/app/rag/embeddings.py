@@ -48,13 +48,6 @@ class EmbeddingGenerator:
         # # Get embedding dimension from model
         # self.dimension = getattr(self.model, "embedding_size", None)
         # logger.info(f"Embedding dimension: {self.dimension}")
-        #
-        # # Verify dimension matches config
-        # if self.dimension != settings.EMBEDDING_DIMENSION:
-        #     logger.warning(
-        #         f"Model dimension ({self.dimension}) does not match config dimension "
-        #         f"({settings.EMBEDDING_DIMENSION}). Update config!"
-        #     )
 
 
     def embed_chunks(
@@ -87,6 +80,7 @@ class EmbeddingGenerator:
         # Batch processing
         total_batches = (len(texts) + batch_size - 1) // batch_size
         logger.debug(f"Processing {total_batches} number of batches")
+
         all_embeddings = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]

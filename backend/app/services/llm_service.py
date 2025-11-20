@@ -43,9 +43,9 @@ class LLMProvider(str, Enum):
     """Supported LLM providers."""
     OLLAMA = "ollama"
     HUGGINGFACE = "huggingface"
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    AZURE = "azure"
+    # OPENAI = "openai"
+    # ANTHROPIC = "anthropic"
+    # AZURE = "azure"
 
 
 class LLMService:
@@ -278,45 +278,7 @@ class LLMService:
             logger.error(f"Raw response: {response.content}")
             raise ValueError(f"LLM did not return valid JSON: {e}")
 
-    def chat(
-            self,
-            messages: List[Dict[str, str]],
-            system_prompt: Optional[str] = None
-    ) -> LLMResponse:
-        """
-        Multi-turn conversation.
 
-        Args:
-            messages: List of conversation turns
-            system_prompt: Optional system instructions
-
-        Returns:
-            LLMResponse with next turn
-        """
-        # Convert to LangChain messages
-        lc_messages = []
-
-        if system_prompt:
-            lc_messages.append(SystemMessage(content=system_prompt))
-
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content")
-
-            if role == "user":
-                lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
-                lc_messages.append(AIMessage(content=content))
-            elif role == "system":
-                lc_messages.append(SystemMessage(content=content))
-
-        # Generate response
-        response = self.llm.invoke(lc_messages)
-
-        return LLMResponse(
-            content=response.content,
-            model=self.model
-        )
 
     def validate_connection(self) -> bool:
         """

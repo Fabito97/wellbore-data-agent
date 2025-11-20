@@ -165,6 +165,7 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
 
 The API uses Pydantic models to ensure type-safe and consistent responses. Key models include:
 
+- **`DocumentUploadApiResponse`**: Api response for a successful document upload.
 - **`DocumentUploadResponse`**: Response for a successful document upload.
 - **`DocumentContent`**: Detailed information about a processed document.
 - **`Message`**: Represents a message in a chat session.

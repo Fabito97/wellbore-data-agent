@@ -60,7 +60,7 @@ async def chat_with_agent(
     logger.info(f"Agent request for conversation_id: {request.conversation_id}")
     try:
         response = agent.answer(
-            question=request.question,
+            question=request.query,
             conversation_id=request.conversation_id
         )
         return response
@@ -113,7 +113,7 @@ async def stream_chat(
     
     try:
         conversation = conversation_service.get_or_create_conversation(request.conversation_id)
-        conversation_service.add_message(conversation.id, "user", request.question)
+        conversation_service.add_message(conversation.id, "user", request.query)
         
         history = conversation_service.get_history(conversation.id)
 
