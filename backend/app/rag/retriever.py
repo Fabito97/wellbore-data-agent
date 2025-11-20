@@ -5,8 +5,9 @@ This module provides the clean RAG interface that the agent will use.
 It abstracts away the complexity of embedding, vector search, and result formatting.
 """
 
+from sentence_transformers import CrossEncoder
 from app.utils.logger import get_logger
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 from app.rag.vector_store_manager import get_vector_store
@@ -28,6 +29,7 @@ class RetrievalResult:
     similarity_score: float
     chunk_type: str  # "text" or "table"
     metadata: Dict[str, Any]
+    # well_name: Optional[str] = None
 
     def __str__(self) -> str:
         """Human-readable string representation."""
@@ -66,6 +68,9 @@ class DocumentRetriever:
         self.vector_store = get_vector_store()
         self.top_k = top_k or settings.RETRIEVAL_TOP_K
         self.score_threshold = score_threshold or settings.RETRIEVAL_SCORE_THRESHOLD
+
+        # Load once at startup
+        self.reranker_model = CrossEncoder("BAAI/bge-reranker-base")  # or any other reranker model
 
         logger.info(
             f"DocumentRetriever initialized: "
@@ -137,6 +142,10 @@ class DocumentRetriever:
                 f"Retrieved {len(results)} chunks (filtered from {len(raw_results)} candidates"
             )
 
+            if self.reranker_model:
+                results = self._rerank_results(query, results)
+                logger.info("Applied reranking to retrieved chunks")
+
             return results
 
         except Exception as e:
@@ -146,21 +155,28 @@ class DocumentRetriever:
     def retrieve_for_summarization(
             self,
             document_id: str,
-            max_chunks: int = 20
+            max_chunks: int = 20,
+            chunk_index_range: Optional[Tuple[int, int]] = None
     ) -> List[RetrievalResult]:
-        """
-         Retrieve chunks for document summarization (Sub-challenge 1).
-
-         Different from search:
-         - Get chunks from specific document - Coverage-based (whole document)
-         - Order by page/chunk index (not relevance)
          """
-        try:
-            # Get all chunks from document
+          Retrieve chunks for document summarization (Sub-challenge 1).
+
+          Different from search:
+          - Get chunks from specific document - Coverage-based (whole document)
+          - Order by page/chunk index (not relevance)
+         """
+         try:
+            where: Dict[str, int] = {"document_id": document_id}
+            if chunk_index_range:
+                where["chunk_index"] = {
+                    "$gte": chunk_index_range[0],
+                    "$lte": chunk_index_range[1]
+                }
+
             raw_results = self.vector_store.collection.get(
-                where={"document_id": document_id},
+                where=where,
                 include=["documents", "metadatas"],
-                limit=max_chunks,
+                limit=max_chunks
             )
 
             # Convert to results
@@ -186,7 +202,7 @@ class DocumentRetriever:
             logger.info(f"Retrieved {len(results)} chunks for summarization")
             return results
 
-        except Exception as e:
+         except Exception as e:
             logger.error(f"Failed to retrieve for summarization: {e}")
             return []
 
@@ -253,20 +269,38 @@ class DocumentRetriever:
             end_index = chunk_index + window_size
 
             # Get all chunks in range
-            # Note: This is simplified - real impl would query by chunk_index range
-            results = self.retrieve_for_summarization(document_id, max_chunks=100)
-
-            # Filter to window
-            window = [
-                r for r in results
-                if start_index <= r.metadata.get('chunk_index', 0) <= end_index
-            ]
-
-            return window
+            return self.retrieve_for_summarization(
+                document_id,
+                max_chunks=100,
+                chunk_index_range=(start_index, end_index)
+            )
 
         except Exception as e:
             logger.error(f"Failed to get context window: {e}")
             return []
+
+
+
+    def _rerank_results(self, query: str, chunks: list[RetrievalResult]) -> list[RetrievalResult]:
+        """
+        Reranks retrieved chunks using a Hugging Face cross-encoder.
+        Each chunk must have a 'content' field.
+        Returns chunks sorted by relevance score (descending).
+        """
+        # Prepare input pairs: (query, chunk_text)
+        pairs = [(query, r.content) for r in chunks]
+
+        # Predict relevance scores
+        scores = self.reranker_model.predict(pairs)
+
+        # Attach scores to chunks
+        for chunk, score in zip(chunks, scores):
+            chunk.metadata["rerank_score"] = float(score)
+
+
+        # Sort by score descending
+        return sorted(chunks, key=lambda x: x.metadata["rerank_score"], reverse=True)
+
 
     def format_context_for_llm(
             self,
@@ -293,7 +327,7 @@ class DocumentRetriever:
         for i, result in enumerate(results, 1):
             # Format each chunk
             chunk_text = (
-                f"[Source {i}: {result.citation}]\n"
+                f"[Source {i}: {result.citation if result.citation else "No source"}]\n"
                 f"{result.content}\n"
             )
 

@@ -10,7 +10,7 @@ logger = get_logger(__name__)
 async def health_check():
     """Health check endpoint."""
     from app.services.llm_service import get_llm_service
-    from app.rag.vector_store import get_vector_store
+    from app.rag.vector_store_manager import get_vector_store
 
     logger.info("Checking system health...")
 

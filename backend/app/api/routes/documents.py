@@ -4,6 +4,7 @@ Document Management Routes.
 Handles document upload, listing, and deletion.
 All operations are synchronous REST endpoints.
 """
+from pydantic import BaseModel
 
 from app.utils.logger import get_logger
 from pathlib import Path
@@ -17,6 +18,7 @@ from fastapi.responses import JSONResponse
 from app.services.document_service import DocumentService, get_document_service
 from app.models.document import DocumentUploadResponse, DocumentProcessingError
 from app.core.config import settings
+from app.models.schema import ApiResponse
 
 logger = get_logger(__name__)
 
@@ -25,7 +27,12 @@ router = APIRouter()
 
 # ==================== Upload Document ====================
 
-@router.post("/upload", response_model=DocumentUploadResponse)
+class DocumentUploadApiResponse(BaseModel):
+    message: str
+    status: str
+    data: DocumentUploadResponse
+
+@router.post("/upload", response_model=DocumentUploadApiResponse)
 async def upload_document(
         file: UploadFile = File(..., description="PDF document to upload"),
         service: DocumentService = Depends(get_document_service)
@@ -34,7 +41,10 @@ async def upload_document(
     Upload and process a document.
 
     Process:
-    1. Validate file (type, size) 2. Save to temp location (don't fill RAM) 3. Process (extract, chunk, embed, index) 4. Return status
+    1. Validate file (type, size)
+    2. Save to temp location (don't fill RAM)
+    3. Process (extract, chunk, embed, index)
+    4. Return status
 
     Args:
         file: Uploaded PDF file
@@ -58,9 +68,7 @@ async def upload_document(
         )
 
     # Create temp file
-    # Teaching: Why temp file?
-    # - Don't load entire file in memory  (don't fill RAM)
-    # - Process from disk (safer for large files)
+    # - Don't fill RAM - Process from disk (safer for large files)
     # - Auto-cleanup with tempfile
     temp_path = None
 
@@ -87,7 +95,11 @@ async def upload_document(
             )
 
         logger.info(f"Document processed successfully: {result.document_id}")
-        return result
+        return DocumentUploadApiResponse(
+            status="success",
+            message=f"Document uploaded and processed successfully in {result.elapsed_time:.2f} seconds",
+            data=result
+        )
 
     except HTTPException:
         raise  # Re-raise HTTP exceptions
@@ -144,15 +156,6 @@ async def get_document_status(
 ):
     """
     Get processing status of a document.
-
-    Args:
-        document_id: Document identifier
-
-    Returns:
-        Document status information
-
-    Raises:
-        404: Document not found
     """
     status_info = service.get_document_status(document_id)
 
@@ -174,12 +177,6 @@ async def get_document(
 ):
     """
     Get complete document metadata.
-
-    Returns:
-        Full document information
-
-    Raises:
-        404: Document not found
     """
     document = service.get_document(document_id)
 
@@ -202,16 +199,6 @@ async def delete_document(
 ):
     """
     Delete a document and all its data.
-
-    Args:
-        document_id: Document to delete
-
-    Returns:
-        Success message
-
-    Raises:
-        404: Document not found
-        :param service:
     """
     success = service.delete_document(document_id)
 
@@ -234,9 +221,6 @@ async def get_stats(
 ):
     """
     Get overall system statistics.
-
-    Returns:
-        Stats about documents, chunks, vector store
     """
     try:
         stats = service.get_stats()

@@ -7,18 +7,6 @@ This service coordinates the RAG pipeline:
 - Chunking
 - Embedding
 - Vector storage
-
-Teaching: Service Layer Pattern
-- Sits between API routes and core logic
-- Orchestrates multiple components
-- Handles business logic
-- Returns clean results to API
-
-Why separate service?
-- API routes stay thin (just HTTP handling)
-- Business logic in one place
-- Easy to test
-- Reusable across different interfaces (REST, WebSocket, CLI)
 """
 from app.utils.logger import get_logger
 from datetime import datetime
@@ -69,13 +57,8 @@ class DocumentService:
         Complete document ingestion pipeline.
 
         Process:
-        1. Generate document ID
-        2. Move file to permanent storage
-        3. Process PDF (extract text/tables)
-        4. Chunk content
-        5. Generate embeddings
-        6. Store in vector database
-        7. Update registry
+        1. Generate document ID  2. Move file to permanent storage  3. Process PDF (extract text/tables)
+        4. Chunk content  5. Generate embeddings 6. Store in vector database 7. Update registry
 
         Args:
             file_path: Path to uploaded file (temp location)
@@ -88,11 +71,7 @@ class DocumentService:
         Raises:
             Exception: If any step fails
 
-        Teaching: Pipeline orchestration
-        - Each step depends on previous
         - If any fails, whole pipeline fails
-        - Return meaningful error to user
-        - Log everything for debugging
         """
         start_time = time.time()
 
@@ -162,7 +141,8 @@ class DocumentService:
                 table_count=document.table_count,
                 chunk_count=document.chunk_count,
                 uploaded_at=document.processed_at.isoformat(),
-                message=f"Document processed successfully in {elapsed:.1f}s"
+                message=f"Document processed successfully in {elapsed:.1f}s",
+                elapsed_time=elapsed
             )
 
         except Exception as e:
@@ -178,10 +158,8 @@ class DocumentService:
 
     def get_document(self, document_id: str) -> Optional[DocumentContent]:
         """
-        Retrieve document metadata by ID.
+        Retrieve document metadata by ID. - In-memory for hackathon
 
-        Teaching: Simple registry lookup
-        - In-memory for hackathon
         - Production: Query database
         """
         return self._documents.get(document_id)
@@ -205,11 +183,6 @@ class DocumentService:
         1. Remove from vector store
         2. Delete file from disk
         3. Remove from registry
-
-        Teaching: Cleanup is important!
-        - Don't leave orphaned data
-        - Free up storage
-        - Maintain consistency
         """
         try:
             logger.info(f"Deleting document {document_id}")

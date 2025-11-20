@@ -70,15 +70,18 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
   - **Success Response (200)**: `DocumentUploadResponse` model.
     ```json
     {
-      "document_id": "string",
-      "filename": "string",
-      "status": "indexed",
-      "page_count": 0,
-      "word_count": 0,
-      "table_count": 0,
-      "chunk_count": 0,
-      "uploaded_at": "string",
-      "message": "Document uploaded and processed successfully"
+      "status": "success",
+      "message": "Document uploaded and processed successfully",
+      "data": {
+        "document_id": "string",
+        "filename": "string",
+        "status": "indexed",
+        "page_count": 0,
+        "word_count": 0,
+        "table_count": 0,
+        "chunk_count": 0,
+        "uploaded_at": "string"      
+      }
     }
     ```
 
@@ -87,6 +90,7 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
   - **Success Response (200)**:
     ```json
     {
+      "status": "success",
       "total": 0,
       "documents": []
     }
@@ -161,6 +165,7 @@ The API is versioned and all endpoints are prefixed with `/api/v1`.
 
 The API uses Pydantic models to ensure type-safe and consistent responses. Key models include:
 
+- **`DocumentUploadApiResponse`**: Api response for a successful document upload.
 - **`DocumentUploadResponse`**: Response for a successful document upload.
 - **`DocumentContent`**: Detailed information about a processed document.
 - **`Message`**: Represents a message in a chat session.

@@ -1,5 +1,6 @@
 // src/features/documents/documentsApi.ts
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+import { BASE_URL } from "./chatApi";
 
 // -----------------------------
 // Types EXACTLY matching backend
@@ -56,7 +57,7 @@ export interface DeleteDocumentResponse {
 export const documentsApi = createApi({
   reducerPath: "documentsApi",
   baseQuery: fetchBaseQuery({
-    baseUrl: "http://localhost:8000/api/v1",
+    baseUrl: `${BASE_URL}/api/v1`,
   }),
 
   tagTypes: ["Documents", "Document"],
