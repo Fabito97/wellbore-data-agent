@@ -8,6 +8,24 @@ from datetime import datetime
 from pathlib import Path
 from enum import Enum
 
+
+class DocumentType(str, Enum):
+    """Common wellbore report categories."""
+    WELL_REPORT = "report"
+    PVT = "pvt"
+    PRODUCTION = "production"
+    WELL_TEST = "test"
+    LOGS = "logs"
+    OTHER = "other"
+
+class DocumentFormat(str, Enum):
+    """Types of documents - NEW but optional."""
+    PDF = "pdf"
+    IMAGE = "image"
+    EXCEL = "excel"
+    OTHER = "other"
+
+
 class DocumentStatus(str, Enum):
     """
     Status of document processing pipeline - ensures only valid statuses are used (type safety).
@@ -38,6 +56,10 @@ class TableData(BaseModel):
     headers: List[str] = Field(default_factory=list, description= "Column headers")
     rows: List[List[str]] = Field(..., description= "Table data as list of rows")
     bbox: Optional[Dict[str, float]] = Field(default=None, description= "Bounding box {x0, y0, x1, y1}")
+
+    # NEW optional fields (won't break existing code)
+    extraction_method: Optional[TableExtractionMethod] = None
+    confidence: Optional[float] = None
 
     @property
     def row_count(self):
@@ -71,81 +93,114 @@ class TableData(BaseModel):
 
 class PageContent(BaseModel):
     """
-    Content extracted from a single page - Enables page-level citations and debug
+    Content extracted from a single page - Enables page-level citations and debug.
+    Auto-calculates word and character counts without overriding __init__.
     """
     page_number: int = Field(..., description="1-indexed page number")
     text: str = Field(..., description="Raw text extracted from page")
-    tables: List[TableData] = Field(..., description="Tables extracted from page")
-    word_count: int = Field(0, description="Number of words extracted from page")
-    char_count: int = Field(0, description="Number of characters extracted from page")
+    tables: List['TableData'] = Field(default_factory=list, description="Tables extracted from page")
     has_images: bool = Field(False, description="Whether page contains images")
+
+    # NEW optional fields
+    is_scanned: bool = False
+    ocr_confidence: Optional[float] = None
 
     @field_validator("text")
     @classmethod
     def clean_text(cls, v: str) -> str:
         """
-        Clean extracted text like multiple spaces, weird line breaks, special characters
+        Clean extracted text: remove multiple spaces and weird line breaks.
         """
-        # Remove multiple spaces
-        v = " ".join(v.split())
-        return v.strip()
+        return " ".join(v.split()).strip()
+
+    @property
+    def word_count(self) -> int:
+        """Number of words in the cleaned text."""
+        return len(self.text.split())
+
+    @property
+    def char_count(self) -> int:
+        """Number of characters in the cleaned text."""
+        return len(self.text)
+
+    @property
+    def table_count(self) -> int:
+        """Number of tables on this page."""
+        return len(self.tables)
 
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Auto-calculate counts if not provided
-        if self.word_count == 0:
-            self.word_count = len(self.text.split())
-        if self.char_count == 0:
-            self.char_count = len(self.text)
+class Well(BaseModel):
+    """
+    This is the well models for tracking each well documents.
+    """
+    well_id: str = Field(..., description="Unique ID")
+    well_name: str = Field(..., description="Well name")
+    document_count: int = Field(0, description="Count of documents")
+    uploaded_at: datetime = Field(..., description="Date and time of uploaded") # for tracking the upload date for filtering
 
+
+from typing import List, Optional, Dict, Any
+from pathlib import Path
+from datetime import datetime
+from pydantic import BaseModel, Field
 
 class DocumentContent(BaseModel):
     """
-    This is the main output of our document processor.
+    Main output of document processing.
 
-    Complete processed document content (everything needed for RAG pipeline).
+    Stores content and metadata from a processed document,
+    suitable for RAG pipelines.
     """
+
     # Identification
     document_id: str = Field(..., description="Unique document identifier")
     filename: str = Field(..., description="Original filename")
     file_path: Path = Field(..., description="Path to stored PDF file")
 
-    # Content
-    pages: List[PageContent] = Field(..., description="Content from each page extracted from the document")
-    full_text: str = Field("", description="Full text extracted from all pages in the document")
+    # Well/folder metadata
+    well_id: Optional[str] = Field(None, description="Unique well identifier")
+    well_name: Optional[str] = Field(None, description="Well identifier derived from folder structure")
+    document_type: Optional[str] = Field(None, description="Category/type of document, e.g., PVT, production")
+    original_folder_path: Optional[str] = Field(None, description="Relative path inside uploaded folder/zip")
+    file_format: Optional[str] = Field(None, description="PDF, CSV, TXT, Excel, etc.")
 
-    # Metadata
-    page_count: Optional[int] = Field(..., description="Total number of pages in the document")
-    total_word_count: Optional[int] = Field(0, description="Total number of words extracted from the document")
-    total_char_count: Optional[int] = Field(0, description="Total number of characters extracted from the document")
-    table_count: Optional[int] = Field(0, description="Total number of tables extracted from the document")
-    chunk_count: Optional[int] = Field(0, description="Number of chunks created for RAG")
+    # Content
+    pages: List['PageContent'] = Field(default_factory=list, description="Content from each page")
+    # full_text: Optional[str] = Field(None, description="Full text extracted from all pages")
+
+    # Metadata / aggregates
+    page_count: Optional[int] = Field(None, description="Total number of pages")
+    # total_word_count: Optional[int] = Field(None, description="Total word count")
+    # total_char_count: Optional[int] = Field(None, description="Total character count")
+    # table_count: Optional[int] = Field(None, description="Total number of tables")
+    chunk_count: int = Field(0, description="Number of chunks created for RAG")
 
     # Processing info
-    status: DocumentStatus = Field(DocumentStatus.PROCESSED, description="Processing status")
-    uploaded_at: Optional[datetime] = Field(default_factory=datetime.now, description="When file was uploaded")
-    processed_at: Optional[datetime] = Field(None, description="When processing complete")
-    processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
+    status: 'DocumentStatus' = Field(..., description="Processing status")
+    uploaded_at: datetime = Field(default_factory=datetime.utcnow)
+    processed_at: Optional[datetime] = Field(None)
+    processing_time_seconds: Optional[float] = Field(None)
+    extraction_method: 'TableExtractionMethod' = Field(..., description="Method used for table extraction")
 
-    # Extraction settings used
-    extraction_method: TableExtractionMethod = Field(
-        TableExtractionMethod.PDFPLUMBER,
-        description="Method used for table extraction",
-    )
+    # Optional flags
+    ocr_enabled: bool = False
 
+    # --- Computed properties ---
+    @property
+    def full_text(self) -> str:
+        return self.full_text or "\n\n".join(page.text for page in self.pages)
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Auto-calculate aggregates if not provided
-        if not self.full_text:
-            self.full_text = "\n\n".join(page.text for page in self.pages)
-        if self.total_word_count == 0:
-            self.total_word_count = sum(page.word_count for page in self.pages)
-        if self.total_char_count == 0:
-            self.total_char_count = sum(page.char_count for page in self.pages)
-        if self.table_count == 0:
-            self.table_count = sum(len(page.tables) for page in self.pages)
+    @property
+    def total_word_count(self) -> int:
+        return sum(page.word_count for page in self.pages)
+
+    @property
+    def total_char_count(self) -> int:
+        return sum(page.char_count for page in self.pages)
+
+    @property
+    def table_count(self) -> int:
+        return sum(page.table_count for page in self.pages)
 
     @property
     def all_tables(self) -> List[TableData]:
@@ -161,16 +216,21 @@ class DocumentContent(BaseModel):
         return {
             "document_id": self.document_id,
             "filename": self.filename,
+            "well_id": self.well_id,
             "pages": self.page_count,
             "words": self.total_word_count,
             "tables": self.table_count,
             "chunks": self.chunk_count,
             "status": self.status,
+            "well_name": self.well_name,
+            "document_type": self.document_type,
             "uploaded": self.uploaded_at.isoformat(),
             "processed": self.processed_at.isoformat() if self.processed_at else "pending",
             "processing_time": f"{self.processing_time_seconds:.2f}s" if self.processing_time_seconds else "N/A"
         }
 
+    class Config:
+        arbitrary_types_allowed = True
 
 # ==================== Chunk Models (for RAG) ====================
 class DocumentChunk(BaseModel):
@@ -181,6 +241,11 @@ class DocumentChunk(BaseModel):
     chunk_id: str = Field(..., description="Unique chunk identifier")
     document_id: str = Field(..., description="Parent document ID")
     content: str = Field(..., description="Chunk text content")
+
+    # Well/folder metadata
+    well_id: str = Field(..., description="Well Id")
+    well_name: str = Field(..., description="Well name")
+    document_type: str = Field(..., description="Category/type of document, e.g., PVT, production")
 
     # Position tracking
     page_number: Optional[int] = Field(None, description="Source page number")
@@ -210,6 +275,10 @@ class DocumentUploadResponse(BaseModel):
     """
     document_id: str
     filename: str
+    well_id: str
+    well_name: str
+    document_type: str
+    format: str
     status: DocumentStatus
     page_count: int
     word_count: int
@@ -219,6 +288,19 @@ class DocumentUploadResponse(BaseModel):
     elapsed_time: float  # Time taken to process in seconds
     message: str = "Document uploaded and processed successfully"
 
+
+
+# ==================== NEW: Batch Upload Response (Optional to use) ====================
+
+class BatchUploadResponse(BaseModel):
+    """NEW: For batch processing. Only use if you need it."""
+    total_documents: int
+    successful: int
+    failed: int
+    documents: List[DocumentUploadResponse]
+    errors: List[Dict[str, str]] = []
+    total_time: float
+    message: str
 
 
 class DocumentProcessingError(BaseModel):

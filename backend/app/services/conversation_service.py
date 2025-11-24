@@ -11,7 +11,6 @@ from sqlalchemy import select, func
 from fastapi import Depends, HTTPException
 
 from app.core.database import Conversation, Message, get_db
-from app.services.llm_service import LLMService, get_llm_service
 from app.models.message import Message as PydanticMessage
 
 logger = get_logger(__name__)
@@ -21,9 +20,8 @@ class ConversationService:
     Manages the lifecycle of conversations in a persistent database with robust
     logging and error handling.
     """
-    def __init__(self, db_session: Session, llm_service: LLMService):
+    def __init__(self, db_session: Session):
         self.db = db_session
-        self.llm = llm_service
         logger.debug("ConversationService initialized with database session.")
 
     def get_or_create_conversation(self, conversation_id: Optional[str] = None) -> Conversation:
@@ -167,13 +165,29 @@ class ConversationService:
             self.db.rollback()
             raise HTTPException(status_code=500, detail="Failed to delete conversation.")
 
+    def delete_all_conversations(self) -> bool:
+        """
+        Deletes ALL conversations and their messages.
+        """
+        try:
+            num_deleted = self.db.query(Conversation).delete()  # deletes all rows
+            self.db.commit()
+
+            logger.info(f"Deleted ALL conversations ({num_deleted} total)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Database error in delete_all_conversations: {e}", exc_info=True)
+            self.db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to delete all conversations.")
+
+
 # ==================== FastAPI Dependency ====================
 
 def get_conversation_service(
-        db: Session = Depends(get_db),
-        llm_service: LLMService = Depends(get_llm_service)
+        db: Session = Depends(get_db)
 ) -> ConversationService:
     """
     FastAPI dependency to get an instance of the ConversationService.
     """
-    return ConversationService(db_session=db, llm_service=llm_service)
+    return ConversationService(db_session=db)

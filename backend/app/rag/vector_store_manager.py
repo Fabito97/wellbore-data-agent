@@ -36,7 +36,10 @@ class VectorStoreManager:
         self.vector_store = Chroma(
             collection_name=settings.CHROMA_COLLECTION_NAME,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_directory
+            persist_directory=self.persist_directory,
+            collection_metadata={
+                "hnsw:space": settings.CHROMA_DISTANCE_METRIC
+            }
         )
 
         self.collection = self.vector_store._collection
@@ -65,14 +68,28 @@ class VectorStoreManager:
         texts = [chunk.content for chunk in chunks_with_ids]
         metadatas = [chunk.metadata for chunk in chunks_with_ids]
 
-        # ✅ Add with explicit IDs (key improvement!)
-        self.vector_store.add_texts(
-            texts=texts,
-            metadatas=metadatas,
-            ids=ids  # This ensures we control IDs
-        )
+        # If embeddings are already present, use add_embeddings
+        if hasattr(chunks_with_ids[0], "embedding") and chunks_with_ids[0].embedding is not None:
+            embeddings = [chunk.embedding for chunk in chunks_with_ids]
+            self.collection.add(
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids,
+                documents=texts
+            )
 
-        logger.info(f"Successfully added {len(chunks_with_ids)} chunks")
+            logger.info(f"Added {len(chunks_with_ids)} chunks with precomputed embeddings")
+
+        else:
+            # Fall back to auto-embedding if none provided
+            self.vector_store.add_texts(
+                texts=texts,
+                metadatas=metadatas,
+                ids=ids
+            )
+
+            logger.info(f"Successfully added {len(chunks_with_ids)} chunks")
+
         return len(chunks_with_ids)
 
     # -------------------- Enhanced Query Methods --------------------
@@ -109,7 +126,7 @@ class VectorStoreManager:
             formatted.append({
                 "content": doc.page_content,
                 "metadata": doc.metadata,
-                "similarity_score": 1 - distance # normalize_score(distance),  # Convert distance to similarity
+                "similarity_score": 1 - distance, # normalize_score(distance)  # Convert distance to similarity
                 "chunk_id": doc.metadata.get("chunk_id", "")
             })
 
@@ -196,7 +213,10 @@ class VectorStoreManager:
         self.vector_store = Chroma(
             collection_name=settings.CHROMA_COLLECTION_NAME,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_directory
+            persist_directory=self.persist_directory,
+            collection_metadata={
+                "hnsw:space": settings.CHROMA_DISTANCE_METRIC
+            }
         )
 
         logger.info("Vector store cleared and recreated")

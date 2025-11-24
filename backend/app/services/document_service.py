@@ -1,27 +1,32 @@
 """
-Document Service - Orchestrates document ingestion pipeline.
+Document Service with Database Persistence.
 
-This service coordinates the RAG pipeline:
-- File handling
-- Document processing
-- Chunking
-- Embedding
-- Vector storage
+Now stores:
+- Well metadata in DB
+- Document metadata in DB
+- Chunks in vector store (as before)
 """
+from app.utils.folder_utils import scan_folder_structure, normalize_zip_structure, extract_well_name
+from app.utils.helper import normalize_well_name
 from app.utils.logger import get_logger
 from datetime import datetime
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Union
 import time
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+from fastapi import Depends
 
 from app.models.document import (
     DocumentContent,
     DocumentStatus,
     DocumentUploadResponse,
-    DocumentProcessingError
+    DocumentProcessingError,
+    BatchUploadResponse
 )
+from app.core.database import Well, Document, get_db
 from app.rag.document_processor import process_pdf
 from app.rag.chunking import chunk_document
 from app.rag.embeddings import embed_chunks
@@ -31,318 +36,465 @@ from app.core.config import settings
 logger = get_logger(__name__)
 
 
-
 class DocumentService:
-    """
-    Service for document management and ingestion.
-    """
+    """Service for document management with database persistence."""
 
-    def __init__(self):
-        """Initialise service with required components."""
+    def __init__(self, db: Session):
+        """Initialize with database session."""
+        self.db = db
         self.vector_store = get_vector_store()
+        logger.info("DocumentService initialized with database")
 
-        # In-memory document registry (simple for hackathon)
-        self._documents: Dict[str, DocumentContent] = {}
+    # ==================== Well Management ====================
 
-        logger.info("DocumentService initialized")
+    def get_or_create_well(self, well_name: str) -> Well:
+        """Get existing well or create new one."""
+        # Check if exists
+        stmt = select(Well).where(Well.name == well_name)
+        well = self.db.execute(stmt).scalar_one_or_none()
 
+        if well:
+            logger.debug(f"Found existing well: {well_name}")
+            return well
 
-    def ingest_document(
+        # Create new
+        new_well = Well(
+            id=f"well-{uuid.uuid4().hex[:8]}",
+            name=well_name,
+            document_count=0
+        )
+
+        self.db.add(new_well)
+        self.db.commit()
+        self.db.refresh(new_well)
+
+        logger.info(f"✅ Created well: {well_name} ({new_well.id})")
+        return new_well
+
+    def list_wells(self) -> List[Dict[str, Any]]:
+        """List all wells."""
+        stmt = select(Well).order_by(Well.created_at.desc())
+        wells = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "id": w.id,
+                "name": w.name,
+                "document_count": w.document_count,
+                "created_at": w.created_at.isoformat()
+            }
+            for w in wells
+        ]
+
+    def list_wells_with_documents(self) -> List[Dict[str, Any]]:
+        stmt = select(Well).order_by(Well.created_at.desc())
+        wells = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "id": w.id,
+                "name": w.name,
+                "document_count": len(w.documents),
+                "documents": [
+                    {
+                        "id": d.id,
+                        "filename": d.filename,
+                        "document_type": d.document_type,
+                        "uploaded_at": d.uploaded_at.isoformat()
+                    }
+                    for d in w.documents
+                ],
+                "created_at": w.created_at.isoformat()
+            }
+            for w in wells
+        ]
+
+    def list_documents_by_well(self, well_id: str) -> List[Dict[str, Any]]:
+        stmt = select(Document).where(Document.well_id == well_id).order_by(Document.uploaded_at.desc())
+        docs = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "document_id": d.id,
+                "filename": d.filename,
+                "document_type": d.document_type,
+                "uploaded_at": d.uploaded_at.isoformat()
+            }
+            for d in docs
+        ]
+
+    def get_well(
             self,
-            file_path: Path,
-            original_filename: str,
-            document_id: Optional[str] = None
-    ) -> DocumentUploadResponse | DocumentProcessingError:
-        """
-        Complete document ingestion pipeline.
+            well_id: int | None = None,
+            well_name: str | None = None
+    ):
+        # Validate
+        if (well_id and well_name) or (not well_id and not well_name):
+            raise ValueError("Provide exactly one of well_id or well_name.")
 
-        Process:
-        1. Generate document ID  2. Move file to permanent storage  3. Process PDF (extract text/tables)
-        4. Chunk content  5. Generate embeddings 6. Store in vector database 7. Update registry
+        stmt = None
 
-        Args:
-            file_path: Path to uploaded file (temp location)
-            original_filename: Original filename from user
-            document_id: Optional custom ID
+        if well_id:
+            stmt = select(Well).where(Well.id == well_id)
+        else:
+            normalized_name = normalize_well_name(well_name)
+            stmt = select(Well).where(Well.name == normalized_name)
 
-        Returns:
-            DocumentUploadResponse with status and metadata
+        well = self.db.execute(stmt).scalar_one_or_none()
+        if not well:
+            return None  # or raise NotFound
 
-        Raises:
-            Exception: If any step fails
+        # Load documents for the well
+        docs_stmt = select(Document).where(Document.well_id == well.id)
+        docs = self.db.execute(docs_stmt).scalars().all()
 
-        - If any fails, whole pipeline fails
-        """
+        return {
+            "id": well.id,
+            "name": well.name,
+            "created_at": well.created_at,
+            "document_count": len(docs),
+            "documents": [
+                {
+                    "document_id": d.id,
+                    "filename": d.filename,
+                    "document_type": d.document_type
+                }
+                for d in docs
+            ]
+        }
+
+    # ==================== Folder Ingestion ====================
+
+    def ingest_folder(
+        self,
+        folder_path: Path,
+        original_filename: str,
+        well_name: Optional[str] = None,
+    ) -> BatchUploadResponse:
+        """Ingest well reports from folder with DB persistence."""
         start_time = time.time()
-
-        # Generate unique ID
-        doc_id = document_id or str(uuid.uuid4())
-        print(f"Starting ingestion for: {original_filename} (ID: {doc_id})")
-        logger.info(f"Starting ingestion for: {original_filename} (ID: {doc_id})")
+        logger.info(f"🚀 [BatchUpload] Starting: {original_filename}")
 
         try:
-            # Step 1: Save file to permanent storage
-            logger.debug("Step 1/5: Saving file to permanent storage")
-            permanent_path = self._save_file_permanently(
-                file_path,
-                doc_id,
-                original_filename,
-            )
+            # Normalize folder
+            normalized_folder = normalize_zip_structure(folder_path)
+            logger.info(f"📁 Normalized: {normalized_folder.name}")
 
-            # Step 2: Process PDF
-            print(f"Step 2/5: Processing PDF with {permanent_path}")
-            document = process_pdf(
-                permanent_path,
-                document_id=doc_id,
-            )
-            # Override filename to use original
-            document.filename = original_filename
+            # Extract well name
+            if not well_name:
+                well_name = extract_well_name(normalized_folder.name)
+            logger.info(f"🔍 Well name: {well_name}")
 
-            # Step 3: Chunk document
-            logger.debug("Step 3/5: Chunking document")
-            chunks = chunk_document(document)
+            # Get or create well in DB
+            well = self.get_or_create_well(well_name)
+            well_id = well.id
 
-            # Update document with chunk count
-            document.chunk_count = len(chunks)
+            # Scan structure
+            structure = scan_folder_structure(normalized_folder)
+            report_groups = structure.get("reports", [])
 
-            # Step 4: Generate embeddings
-            logger.debug("Step 4/5: Generating embeddings")
-            chunks_with_embeddings = embed_chunks(chunks)
+            if not report_groups:
+                logger.warning("⚠️  No well reports found!")
+                return BatchUploadResponse(
+                    total_documents=0,
+                    successful=0,
+                    failed=0,
+                    documents=[],
+                    errors=[{"filename": original_filename, "error": "No well reports found"}],
+                    total_time=time.time() - start_time,
+                    message="No well reports found"
+                )
 
-            # Step 5: Store in vector database
-            logger.debug("Step 5/5: Storing embeddings in vector database")
-            added = self.vector_store.add_chunks(chunks_with_embeddings)
+            total_documents = sum(len(r.get("documents", [])) for r in report_groups)
+            logger.info(f"📊 Found {total_documents} PDFs")
 
-            if added != len(chunks):
-                logger.warning(f"Added {added} chunks but expected {len(chunks)}")
+            # Process documents
+            documents = []
+            errors = []
 
-            # Update status
-            document.status = DocumentStatus.INDEXED
-            document.processed_at = datetime.utcnow()
-            document.processing_time_seconds = time.time() - start_time
+            for report in report_groups:
+                doc_type = report.get("document_type")
+                file_list = report.get("documents", [])
 
-            # Store in registry
-            self._documents[doc_id] = document
+                for idx, file_path in enumerate(file_list, 1):
+                    logger.info(f"  [{idx}/{len(file_list)}] {file_path.name}")
+
+                    try:
+                        resp = self.ingest_document(
+                            file_path=file_path,
+                            original_filename=file_path.name,
+                            well_id=well_id,
+                            well_name=well_name,
+                            document_type=doc_type,
+                            original_folder_path=str(file_path.parent.relative_to(folder_path))
+                        )
+
+                        if isinstance(resp, DocumentUploadResponse):
+                            documents.append(resp)
+                            logger.info(f"  ✅ Success")
+                        else:
+                            errors.append({"filename": file_path.name, "error": resp.error})
+                            logger.error(f"  ❌ Error")
+
+                    except Exception as e:
+                        logger.exception(f"  💥 Exception: {e}")
+                        errors.append({"filename": file_path.name, "error": str(e)})
+
+            # Update well document count
+            well.document_count = len(documents)
+            self.db.commit()
 
             elapsed = time.time() - start_time
+            message = f"Well {well_name}: {len(documents)}/{total_documents} processed in {elapsed:.1f}s"
+            logger.info(f"✅ {message}")
 
-            logger.info(
-                f"Document ingestion complete: {original_filename} "
-                f"({elapsed:.2f}s, {len(chunks)} chunks)"
+            return BatchUploadResponse(
+                total_documents=total_documents,
+                successful=len(documents),
+                failed=len(errors),
+                documents=documents,
+                errors=errors,
+                total_time=elapsed,
+                message=message
             )
 
-            # Return response
+        except Exception as e:
+            logger.exception(f"💥 Batch upload failed: {e}")
+            return BatchUploadResponse(
+                total_documents=0,
+                successful=0,
+                failed=1,
+                documents=[],
+                errors=[{"filename": original_filename, "error": str(e)}],
+                total_time=time.time() - start_time,
+                message=f"Failed: {str(e)}"
+            )
+
+    # ==================== Document Ingestion ====================
+
+    def ingest_document(
+        self,
+        file_path: Path,
+        original_filename: str,
+        document_id: Optional[str] = None,
+        well_id: Optional[str] = None,
+        well_name: Optional[str] = None,
+        document_type: Optional[str] = None,
+        original_folder_path: Optional[str] = None,
+        file_format: Optional[str] = None,
+    ) -> Union[DocumentUploadResponse, DocumentProcessingError]:
+        """Ingest single document with DB persistence."""
+        start_time = time.time()
+        doc_id = document_id or str(uuid.uuid4())
+
+        logger.info(f"Ingesting: {original_filename} ({doc_id})")
+
+        try:
+            # Save file
+            permanent_path = self._save_file_permanently(
+                file_path, doc_id, original_filename
+            )
+
+            # Process PDF
+            document_content = process_pdf(permanent_path, document_id=doc_id)
+            document_content.filename = original_filename
+            document_content.well_id = well_id
+            document_content.well_name = well_name
+            document_content.document_type = document_type
+            document_content.original_folder_path = original_folder_path
+            document_content.file_format = file_format or "pdf"
+
+            # Chunk
+            chunks = chunk_document(document_content)
+            document_content.chunk_count = len(chunks)
+
+            # Embed
+            chunks_with_embeddings = embed_chunks(chunks)
+
+            # Store in vector DB
+            added = self.vector_store.add_chunks(chunks_with_embeddings)
+            if added != len(chunks):
+                logger.warning(f"Added {added}/{len(chunks)} chunks")
+
+            # Store metadata in DB
+            db_document = Document(
+                id=doc_id,
+                filename=original_filename,
+                file_path=str(permanent_path),
+                well_id=well_id,
+                well_name=well_name,
+                document_type=document_type,
+                file_format=file_format or "pdf",
+                original_folder_path=original_folder_path,
+                status="indexed",
+                page_count=document_content.page_count,
+                word_count=document_content.total_word_count,
+                table_count=document_content.table_count,
+                chunk_count=len(chunks),
+                processing_time_seconds=time.time() - start_time,
+                extraction_method=str(document_content.extraction_method.value),
+                ocr_enabled=document_content.ocr_enabled,
+                processed_at=datetime.utcnow()
+            )
+
+            self.db.add(db_document)
+            self.db.commit()
+            self.db.refresh(db_document)
+
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Indexed: {elapsed:.2f}s, {len(chunks)} chunks")
+
             return DocumentUploadResponse(
                 document_id=doc_id,
                 filename=original_filename,
+                well_id=well_id or "unknown",
+                well_name=well_name or "unknown",
+                document_type=document_type or "unknown",
+                format=file_format or "pdf",
                 status=DocumentStatus.INDEXED,
-                page_count=document.page_count,
-                word_count=document.total_word_count,
-                table_count=document.table_count,
-                chunk_count=document.chunk_count,
-                uploaded_at=document.processed_at.isoformat(),
-                message=f"Document processed successfully in {elapsed:.1f}s",
+                page_count=document_content.page_count,
+                word_count=document_content.total_word_count,
+                table_count=document_content.table_count,
+                chunk_count=len(chunks),
+                uploaded_at=db_document.uploaded_at.isoformat(),
                 elapsed_time=elapsed
             )
 
         except Exception as e:
-            logger.error(f"Document ingestion failed: {e}", exc_info=True)
+            logger.error(f"Ingestion failed: {e}", exc_info=True)
+            self.db.rollback()
 
-            # Return error response
             return DocumentProcessingError(
                 document_id=doc_id,
                 filename=original_filename,
                 error=str(e),
-                details="See logs for full traceback",
+                details="See logs"
             )
 
-    def get_document(self, document_id: str) -> Optional[DocumentContent]:
-        """
-        Retrieve document metadata by ID. - In-memory for hackathon
+    # ==================== Query Methods ====================
 
-        - Production: Query database
-        """
-        return self._documents.get(document_id)
-
-    def list_documents(self) -> list[Dict[str, Any]]:
-        """
-        List all documents with summary info.
-
-        Use case:
-        - Show user their uploaded documents
-        - Display in UI
-        - Status tracking
-        """
-        return [doc.summary for doc in self._documents.values()]
-
-    def delete_document(self, document_id: str) -> bool:
-        """
-        Delete document and all its chunks.
-
-        Process:
-        1. Remove from vector store
-        2. Delete file from disk
-        3. Remove from registry
-        """
-        try:
-            logger.info(f"Deleting document {document_id}")
-
-            # Get document
-            document = self._documents.get(document_id)
-            if not document:
-                logger.warning(f"Document {document_id} not found in registry")
-                return False
-
-            # Step 1: Remove from vector store
-            deleted = self.vector_store.delete_by_document_id(document_id)
-            logger.debug(f"Deleted {deleted} chunks from vector store")
-
-            # Step 2: Delete file from disk (optional - might want to keep)
-            try:
-                if document.file_path.exists():
-                    document.file_path.unlink()
-                    logger.info(f"Deleted file: {document.file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete file: {e}")
-
-            # Step 3: Remove from registry
-            del self._documents[document_id]
-
-            logger.info(f"Document {document_id} deleted successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to delete document {document_id}: {e}")
-            return False
-
+    def get_document(self, document_id: str) -> Optional[Document]:
+        """Get document by ID."""
+        return self.db.get(Document, document_id)
 
     def get_document_status(self, document_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get current status of document processing.
-
-        Use case:
-        - Progress tracking for long uploads
-        - Show status in UI
-        - Debugging
-        """
-        document = self._documents.get(document_id)
-        if not document:
+        """Return processing/status information for a document (JSON-serializable)."""
+        doc = self.db.get(Document, document_id)
+        if not doc:
             return None
 
         return {
-            "document_id": document_id,
-            "filename": document.filename,
-            "status": document.status,
-            "page_count": document.page_count,
-            "chunk_count": document.chunk_count,
-            "uploaded_at": document.uploaded_at.isoformat(),
-            "processed_at": document.processed_at.isoformat() if document.processed_at else None,
+            "document_id": doc.id,
+            "status": doc.status,
+            "processing_time_seconds": getattr(doc, "processing_time_seconds", None),
+            "uploaded_at": doc.uploaded_at.isoformat() if getattr(doc, "uploaded_at", None) else None,
+            "processed_at": doc.processed_at.isoformat() if getattr(doc, "processed_at", None) else None,
+            "page_count": getattr(doc, "page_count", None),
+            "chunk_count": getattr(doc, "chunk_count", None),
+            "table_count": getattr(doc, "table_count", None),
+            "well_id": getattr(doc, "well_id", None),
+            "well_name": getattr(doc, "well_name", None),
         }
 
-    def reprocess_document(self, document_id: str) -> DocumentUploadResponse:
-        """
-        Reprocess an existing document.
+    def list_documents(
+        self,
+        well_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """List documents with optional well filter."""
+        stmt = select(Document).order_by(Document.uploaded_at.desc())
 
-        Use case:
-        - Settings changed (chunk size, etc.)
-        - Bug fixed in processing
-        - Want to regenerate embeddings
+        if well_name:
+            stmt = stmt.where(Document.well_name == well_name)
 
-        Process:
-        1. Get original file
-        2. Delete old chunks
-        3. Re-run ingestion
-        """
-        document = self._documents.get(document_id)
-        if not document:
-            raise ValueError(f"Document {document_id} not found")
+        docs = self.db.execute(stmt).scalars().all()
 
-        logger.info(f"Reprocessing document: {document.filename}")
+        return [
+            {
+                "document_id": d.id,
+                "filename": d.filename,
+                "well_name": d.well_name,
+                "well_id": d.well_id,
+                "file_format": d.file_format,
+                "table_count": d.table_count,
+                "document_type": d.document_type,
+                "status": d.status,
+                "page_count": d.page_count,
+                "chunk_count": d.chunk_count,
+                "uploaded_at": d.uploaded_at.isoformat(),
+                "processed_at": d.processed_at.isoformat() if d.processed_at else ""
+            }
+            for d in docs
+        ]
 
-        # Delete old chunks
-        self.vector_store.delete_by_document_id(document_id)
+    def delete_document(self, document_id: str) -> bool:
+        """Delete document from DB and vector store."""
+        try:
+            document = self.db.get(Document, document_id)
+            if not document:
+                return False
 
-        # Re-ingest
-        return self.ingest_document(
-            document.file_path,
-            document.filename,
-            document_id=document_id,
-        )
+            # Delete from vector store
+            deleted = self.vector_store.delete_by_document_id(document_id)
+            logger.debug(f"Deleted {deleted} chunks")
 
-    def _save_file_permanently(
-            self,
-            temp_path: Path,
-            document_id: str,
-            original_filename: str
-    ) -> Path:
-        """
-        Move uploaded file to permanent storage.
+            # Delete file
+            try:
+                Path(document.file_path).unlink()
+            except Exception as e:
+                logger.warning(f"Failed to delete file: {e}")
 
-        Teaching: File management
-        - Uploads come to temp directory
-        - Move to permanent location
-        - Use document_id in filename (avoid conflicts)
-        - Preserve extension
+            # Delete from DB
+            self.db.delete(document)
 
-        Storage structure:
-        data/uploads/{document_id}_{original_filename}
-        """
-        # Get file extension
-        extension = Path(original_filename).suffix
+            # Update well count
+            if document.well_id:
+                well = self.db.get(Well, document.well_id)
+                if well:
+                    well.document_count = max(0, well.document_count - 1)
 
-        # Create permanent filename
-        permanent_filename= f"{document_id}{extension}"
-        permanent_path = settings.UPLOAD_DIR / permanent_filename
+            self.db.commit()
 
-        # Move file
-        shutil.move(str(temp_path), str(permanent_path))
+            logger.info(f"Deleted document {document_id}")
+            return True
 
-        logger.debug(f"File saved: {permanent_path}")
-        return permanent_path
+        except Exception as e:
+            logger.error(f"Delete failed: {e}")
+            self.db.rollback()
+            return False
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-         Get service statistics.
-         """
-        total_docs = len(self._documents)
-        total_pages = sum(doc.page_count for doc in self._documents.values())
-        total_chunks = sum(doc.chunk_count for doc in self._documents.values())
+        """Get system statistics."""
+        from sqlalchemy import func as sql_func
+
+        total_docs = self.db.execute(select(sql_func.count(Document.id))).scalar()
+        total_wells = self.db.execute(select(sql_func.count(Well.id))).scalar()
+        total_pages = self.db.execute(select(sql_func.sum(Document.page_count))).scalar() or 0
+        total_chunks = self.db.execute(select(sql_func.sum(Document.chunk_count))).scalar() or 0
 
         vector_stats = self.vector_store.get_stats()
 
         return {
+            "total_wells": total_wells,
             "total_documents": total_docs,
             "total_pages": total_pages,
             "total_chunks": total_chunks,
             "vector_store": vector_stats,
         }
 
+    def _save_file_permanently(
+        self, temp_path: Path, document_id: str, original_filename: str
+    ) -> Path:
+        """Save file to permanent storage."""
+        extension = Path(original_filename).suffix
+        permanent_filename = f"{document_id}{extension}"
+        permanent_path = settings.UPLOAD_DIR / permanent_filename
+        shutil.copy(str(temp_path), str(permanent_path))
+        logger.debug(f"Saved: {permanent_path}")
+        return permanent_path
 
 
-# ==================== Module-level instance ====================
+# ==================== FastAPI Dependency ====================
 
-# Global service instance
-_service_instance: Optional[DocumentService] = None
-
-
-def get_document_service() -> DocumentService:
-    """
-    Get or create global document service instance.
-
-    Teaching: Service singleton
-    - One service instance for whole app
-    - Maintains document registry
-    - Thread-safe (Python GIL)
-
-    Usage:
-        from app.services.document_service import get_document_service
-
-        service = get_document_service()
-        result = service.ingest_document(path, filename)
-    """
-    global _service_instance
-
-    if _service_instance is None:
-        _service_instance = DocumentService()
-
-    return _service_instance
+def get_document_service(db: Session = Depends(get_db)) -> DocumentService:
+    """Get document service with DB session."""
+    return DocumentService(db)

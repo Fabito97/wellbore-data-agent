@@ -1,68 +1,208 @@
 """
-Simple Agent - Basic Q&A using RAG.
+Simple Agent with RAG Tools using LangChain create_agent.
 
-This agent is the central orchestrator for the RAG application. It coordinates
-the retrieval of documents, management of conversation history, and generation
-of responses from the LLM.
+The agent can:
+1. Detect wells from queries
+2. Search documents with well-scoping
+3. Summarize well reports
+4. Extract parameters
+
+Uses modern LangChain create_agent (no AgentExecutor needed).
 """
 from app.utils.logger import get_logger
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from fastapi import Depends
+import json
+
+from langchain_core.tools import tool
+from langchain_ollama import ChatOllama
 
 from app.services.llm_service import get_llm_service, LLMService
 from app.services.conversation_service import get_conversation_service, ConversationService
-from app.rag.retriever import get_retriever, DocumentRetriever, RetrievalResult
+from app.rag.retriever import get_retriever, DocumentRetriever
 from app.core.config import settings
-from app.models.message import Message
-from app.utils.prompts import system_prompt
+from langchain.agents import create_agent
+# Import RAG tool functions
+from app.agents.tools.rag_tool import (
+    detect_well_from_query,
+    list_available_wells,
+    rag_query_tool,
+    summarize_well_report_tool,
+    extract_parameters_tool,
+)
+from app.utils.prompts import SYSTEM_PROMPT, AGENT_PROMPT
 
 logger = get_logger(__name__)
 
 
+# ==================== Define LangChain Tools ====================
+
+# @tool
+# def detect_well(query: str) -> str:
+#     """
+#     Detect which well the user is asking about from their query.
+#
+#     Input: User's question
+#     Output: Well name (e.g., 'well-4') or 'None' if not detected
+#
+#     Use this FIRST to understand which well to query.
+#     """
+#     result = detect_well_from_query(query)
+#     return result if result else "None"
+#
+
+@tool
+def list_wells(_: str = "") -> str:
+    """
+    List all available wells in the system.
+
+    Input: Empty string (not used)
+    Output: JSON list of wells
+
+    Use when user asks "what wells exist" or when well detection fails.
+    """
+    # rag_tool functions are decorated with @tool; call the wrapped function
+    func = getattr(list_available_wells, "__wrapped__", list_available_wells)
+    wells = func()
+    return json.dumps(wells, indent=2)
+
+
+@tool
+def search_documents(query: str) -> str:
+    """
+    Search well documents with well-scoping.
+
+    Input format: "query|||well_name" (three pipes)
+    Example: "tubing depth|||well-4"
+
+    Output: Relevant document chunks with sources
+
+    Use for specific questions about well data.
+    """
+    try:
+        # parts = query_with_well.split("|||")
+        # query = parts[0].strip()
+        # well_name = parts[1].strip() if len(parts) > 1 else None
+        logger.info("[Tool_call] Calling search document tools")
+        func = getattr(rag_query_tool, "__wrapped__", rag_query_tool)
+        result = func(query=query, top_k=10)
+
+        if result["count"] == 0:
+            return f"No results found for '{query}'"
+
+        # Format results
+        formatted = f"Found {result['count']} results:\n\n"
+        for i, chunk in enumerate(result["results"][:3], 1):  # Top 3
+            formatted += f"{i}. {chunk.content[:200]}...\n"
+            formatted += f"   Source: {chunk.filename}, page {chunk.page_number}\n\n"
+
+        return formatted
+
+    except Exception as e:
+        return f"Error searching: {str(e)}"
+
+
+@tool
+def get_summary_context(well_name: str) -> str:
+    """
+    Get context to summarize a well report.
+
+    Input: Well name (e.g., 'well-4')
+    Output: Document context for summarization
+
+    Use when user asks to "summarize" or "describe" a well.
+    """
+    func = getattr(summarize_well_report_tool, "__wrapped__", summarize_well_report_tool)
+    result = func(well_name)
+
+    if result["chunks_used"] == 0:
+        return f"No documents found for {well_name}"
+
+    return result["context"]
+
+
+@tool
+def get_parameter_context(well_name: str) -> str:
+    """
+    Get tables and text for parameter extraction.
+
+    Input: Well name (e.g., 'well-4')
+    Output: Tables and text with parameter data
+
+    Use when extracting: tubing specs, reservoir pressure, oil gravity, PI, etc.
+    """
+    func = getattr(extract_parameters_tool, "__wrapped__", extract_parameters_tool)
+    result = func(well_name)
+
+    if result["total_chunks"] == 0:
+        return f"No parameter data found for {well_name}"
+
+    return result["context"]
+
+
+# ==================== Agent Response Model ====================
+
 @dataclass
 class AgentResponse:
-    """
-    Response from the agent.
-    """
+    """Response from agent."""
     answer: str
-    sources: List[RetrievalResult]
+    sources: List[str]  # Simplified - just source names
     conversation_id: str
-    confidence: str  # "high", "medium", "low"
-    tokens_used: Optional[int] = None
+    confidence: str
+    well_name: Optional[str] = None
+    tool_calls: int = 0
+    token_usage: Optional[Dict[str, int]] = None
 
-    def format_for_display(self) -> str:
-        """Format response for text display."""
-        output = f"Answer: {self.answer}\n\n"
-        if self.sources:
-            output += "Sources:\n"
-            for i, source in enumerate(self.sources, 1):
-                output += f"{i}. {source.citation} (score: {source.similarity_score:.2f})\n"
-        output += f"\nConfidence: {self.confidence}"
-        return output
-
+# ==================== Simple Agent with Tools ====================
 
 class SimpleAgent:
     """
-    Orchestrating agent for conversation-aware RAG.
+    Agent with RAG tools using LangChain create_agent.
+
+    The agent autonomously:
+    - Detects wells from queries
+    - Searches documents with well-scoping
+    - Generates contextual answers
     """
+
     def __init__(
         self,
         llm_service: LLMService,
         conversation_service: ConversationService,
-        retriever: DocumentRetriever,
-        top_k: int = None,
-        score_threshold: float = None,
-        max_context_tokens: int = 2000
+        retriever: DocumentRetriever
     ):
-        self.llm = llm_service
+        self.llm_service = llm_service
         self.conversations = conversation_service
         self.retriever = retriever
-        self.top_k = top_k or settings.RETRIEVAL_TOP_K
-        self.score_threshold = score_threshold or settings.RETRIEVAL_SCORE_THRESHOLD
-        self.max_context_tokens = max_context_tokens
-        logger.info(f"SimpleAgent initialized: top_k={self.top_k}, threshold={self.score_threshold}")
 
+
+        # Define tools
+        self.tools = [
+            # detect_well,
+            list_wells,
+            search_documents,
+            get_summary_context,
+            get_parameter_context
+        ]
+        # Create LangChain LLM
+        # Create the base Chat model instance. Do NOT call .bind_tools() here –
+        # create_agent expects a `str` (model name) or a BaseChatModel instance.
+        # .bind_tools() returns a Runnable which causes the type error seen.
+        self.llm = ChatOllama(
+            base_url=settings.OLLAMA_BASE_URL,
+            model=settings.OLLAMA_MODEL,
+            temperature=0.1  # Deterministic for tool usage
+        )
+
+        # Create agent
+        self.agent = create_agent(
+            model=self.llm,
+            tools=self.tools,
+            system_prompt=AGENT_PROMPT
+        )
+
+        logger.info("SimpleAgent initialized with RAG tools")
 
     def answer(
         self,
@@ -71,65 +211,101 @@ class SimpleAgent:
         filters: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
         """
-        Answer a question using conversation-aware RAG.
+        Answer question using agent with tools.
+
+        The agent will:
+        1. Analyze the question
+        2. Decide which tools to use
+        3. Call tools autonomously
+        4. Generate final answer
         """
-        logger.info(f"Answering question for conversation_id: {conversation_id}")
-        
-        # 1. Get or create the conversation object from the database
+        logger.info(f"Agent processing: '{question[:100]}...'")
+
+        # Get conversation
         conversation = self.conversations.get_or_create_conversation(conversation_id)
-        
-        # 2. Add user message to DB
         self.conversations.add_message(conversation.id, "user", question)
 
-        # 3. Retrieve documents
-        retrieved = self.retriever.retrieve(query=question, top_k=self.top_k, filters=filters)
-        if not retrieved:
-            retrieved = "No relevant information could be found in the documents to for the query."
-            # self.conversations.add_message(conversation.id, "assistant", answer_text)
-            # return AgentResponse(answer=answer_text, sources=[], confidence="low", conversation_id=conversation.id)
-
-        context = "No context found for the query."
-        # 4. Construct Prompt
-        if retrieved:
-            context = self.retriever.format_context_for_llm(retrieved, max_tokens=self.max_context_tokens)
-
-        prompt_with_context = system_prompt(question=question, context=context)
-
-        # Get full history from DB for the LLM call
-        history = self.conversations.get_history(conversation.id)
-
-        # 5. Generate Answer
         try:
-            llm_response = self.llm.generate(messages=history, system_prompt= prompt_with_context)
-            
-            # 6. Save Assistant's Response and Finalize
-            self.conversations.add_message(conversation.id, "assistant", llm_response.content)
-            
-            # 7. Generate title if it's a new conversation
-            # self.conversations.generate_title_if_needed(conversation)
-
-            confidence = self._assess_confidence(retrieved)
-            
-            return AgentResponse(
-                answer=llm_response.content,
-                sources=retrieved,
-                confidence=confidence,
-                conversation_id=conversation.id,
-                tokens_used=llm_response.total_tokens
+            # Invoke agent
+            result = self.agent.invoke(
+                {"messages": [{"role": "user", "content": question}]}
             )
-        except Exception as e:
-            logger.error(f"Failed to answer question for conversation {conversation.id}: {e}", exc_info=True)
-            error_answer = f"I encountered an error: {str(e)}"
-            self.conversations.add_message(conversation.id, "assistant", error_answer)
-            return AgentResponse(answer=error_answer, sources=[], confidence="low", conversation_id=conversation.id)
 
-    def _assess_confidence(self, results: List[RetrievalResult]) -> str:
-        if not results: return "low"
-        high_quality = sum(1 for r in results if r.similarity_score > 0.7)
-        if high_quality >= 2: return "high"
-        medium_quality = sum(1 for r in results if r.similarity_score > 0.5)
-        if medium_quality >= 1: return "medium"
-        return "low"
+            # Extract answer from agent response
+            answer = self._extract_answer(result)
+
+            # Detect well from original question (for metadata)
+            # well_name = detect_well_from_query(query=question)
+
+            # Count tool calls
+            tool_calls = self._count_tool_calls(result)
+
+            # Save response
+            self.conversations.add_message(conversation.id, "assistant", answer)
+
+            # Assess confidence
+            confidence = self._assess_confidence(answer, tool_calls)
+
+            logger.info(f"Agent completed: {tool_calls} tool calls, confidence={confidence}")
+
+            return AgentResponse(
+                answer=answer,
+                sources=[],  # Simplified for now
+                conversation_id=conversation.id,
+                confidence=confidence,
+                # well_name=well_name,
+                tool_calls=tool_calls
+            )
+
+        except Exception as e:
+            logger.error(f"Agent error: {e}", exc_info=True)
+            error_msg = f"I encountered an error: {str(e)}"
+            self.conversations.add_message(conversation.id, "assistant", error_msg)
+
+            return AgentResponse(
+                answer=error_msg,
+                sources=[],
+                conversation_id=conversation.id,
+                confidence="low"
+            )
+
+    def _extract_answer(self, result: Dict[str, Any]) -> str:
+        """Extract final answer from agent result."""
+        # Agent result contains messages
+        messages = result.get("messages", [])
+
+        # Last message should be the answer
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "content"):
+                return last_msg.content
+            elif isinstance(last_msg, dict):
+                return last_msg.get("content", "No response generated")
+
+        return "No response generated"
+
+    def _count_tool_calls(self, result: Dict[str, Any]) -> int:
+        """Count how many tools were called."""
+        messages = result.get("messages", [])
+        tool_calls = 0
+
+        for msg in messages:
+            if hasattr(msg, "tool_calls"):
+                tool_calls += len(msg.tool_calls)
+            elif isinstance(msg, dict) and msg.get("tool_calls"):
+                tool_calls += len(msg["tool_calls"])
+
+        return tool_calls
+
+    def _assess_confidence(self, answer: str, tool_calls: int) -> str:
+        """Assess confidence based on tool usage."""
+        if tool_calls == 0:
+            return "low"  # No tools used
+        elif tool_calls >= 2:
+            return "high"  # Multiple tools used
+        else:
+            return "medium"  # One tool used
+
 
 # ==================== FastAPI Dependency ====================
 
@@ -138,12 +314,62 @@ def get_simple_agent(
     conversation_service: ConversationService = Depends(get_conversation_service),
     retriever: DocumentRetriever = Depends(get_retriever)
 ) -> SimpleAgent:
-    """
-    FastAPI dependency to get an instance of the SimpleAgent.
-    This creates a new agent for each request, injecting the necessary, request-scoped services.
-    """
+    """FastAPI dependency to get agent."""
     return SimpleAgent(
         llm_service=llm_service,
         conversation_service=conversation_service,
         retriever=retriever
     )
+
+
+# ==================== Test Function ====================
+
+def test_agent():
+    """Test agent with sample queries."""
+    from app.services.llm_service import get_llm_service
+    from app.services.conversation_service import get_conversation_service
+    from app.rag.retriever import get_retriever
+    from app.core.database import SessionLocal
+
+    # Initialize
+    db = SessionLocal()
+    agent = SimpleAgent(
+        llm_service=get_llm_service(),
+        conversation_service=get_conversation_service(db),
+        retriever=get_retriever()
+    )
+
+    print("=" * 80)
+    print("TESTING AGENT WITH TOOLS")
+    print("=" * 80)
+
+    # Test 1: Well detection + search
+    print("\n📋 Test 1: Simple Query")
+    print("-" * 80)
+    response = agent.answer("What is the tubing depth for Well 4?")
+    print(f"Answer: {response.answer}")
+    print(f"Well detected: {response.well_name}")
+    print(f"Tool calls: {response.tool_calls}")
+    print(f"Confidence: {response.confidence}")
+
+    # Test 2: List wells
+    print("\n📋 Test 2: List Wells")
+    print("-" * 80)
+    response = agent.answer("What wells do we have?")
+    print(f"Answer: {response.answer}")
+    print(f"Tool calls: {response.tool_calls}")
+
+    # Test 3: Summarization
+    print("\n📝 Test 3: Summarization")
+    print("-" * 80)
+    response = agent.answer("Summarize Well 4")
+    print(f"Answer: {response.answer[:300]}...")
+    print(f"Tool calls: {response.tool_calls}")
+
+    print("\n" + "=" * 80)
+    print("TESTING COMPLETE")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    test_agent()

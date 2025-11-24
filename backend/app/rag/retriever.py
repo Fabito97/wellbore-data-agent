@@ -4,7 +4,7 @@ Retriever - High-level interface for document retrieval.
 This module provides the clean RAG interface that the agent will use.
 It abstracts away the complexity of embedding, vector search, and result formatting.
 """
-
+import numpy as np
 from sentence_transformers import CrossEncoder
 from app.utils.logger import get_logger
 from typing import List, Dict, Any, Optional, Tuple
@@ -25,6 +25,9 @@ class RetrievalResult:
     content: str
     page_number: int
     document_id: str
+    well_id: str
+    well_name: str
+    document_type: str
     filename: str
     similarity_score: float
     chunk_type: str  # "text" or "table"
@@ -41,10 +44,8 @@ class RetrievalResult:
 
     @property
     def citation(self):
-        """
-        Generate citation string for LLM responses.
-        """
-        return f"{self.filename}, page {self.page_number}"
+        """Generate citation string."""
+        return f"{self.well_name} - {self.document_type} in {self.filename}, page {self.page_number}, chunk_type {self.chunk_type}"  #
 
 
 class DocumentRetriever:
@@ -76,6 +77,7 @@ class DocumentRetriever:
             f"DocumentRetriever initialized: "
             f"top_k={self.top_k}, threshold={self.score_threshold}"
         )
+
 
 
     def retrieve(
@@ -115,13 +117,13 @@ class DocumentRetriever:
             for raw in raw_results:
                 similarity = raw.get('similarity_score', 0.0)
 
-                # Filter by threshold
-                if similarity < self.score_threshold:
-                    logger.debug(
-                        f"Filtering out result with score {similarity:.3f} "
-                        f"(threshold: {self.score_threshold})"
-                    )
-                    continue
+                # # Filter by threshold
+                # if similarity < self.score_threshold:
+                #     logger.debug(
+                #         f"Filtering out result with score {similarity:.3f} "
+                #         f"(threshold: {self.score_threshold})"
+                #     )
+                #     continue
 
                 # Extract metadata
                 metadata = raw.get('metadata', {})
@@ -131,30 +133,81 @@ class DocumentRetriever:
                     content=raw['content'],
                     page_number=metadata.get('page_number', 0),
                     document_id=metadata.get('document_id', ''),
+                    document_type=metadata.get('document_type'),
+                    well_id=metadata.get('well_id', 'unknown'),
+                    well_name=metadata.get('well_name', 'unknown'),
                     filename=metadata.get('filename', 'unknown'),
                     similarity_score=similarity,
                     chunk_type=metadata.get('chunk_type', 'text'),
                     metadata=metadata,
                 )
                 results.append(result)
+                logger.debug(
+                    f"Retrieved result with score {similarity:.3f} "
+                    f"(threshold: {self.score_threshold})"
+                )
+
+            if not results:
+                logger.warning("No candidates retrieved from vector store, returning empty list")
+                return []
+
+            # Step 2: Apply reranker if available
+            if self.reranker_model and results:
+                results = self._rerank_results(query, results)
+                logger.info('Applied reranking to retrieved chunks')
+
+            # Step 3: Ensure at least 3 results
+            if len(results) < 3:
+                logger.warning(f"Only {len(results)} results retrieved; duplicating to ensure minimum 3")
+                while len(results) < 3: results.append(results[-1])
 
             logger.info(
-                f"Retrieved {len(results)} chunks (filtered from {len(raw_results)} candidates"
+                f"Retrieved {len(results)} chunks (reranked from {len(raw_results)} candidates"
             )
-
-            if self.reranker_model:
-                results = self._rerank_results(query, results)
-                logger.info("Applied reranking to retrieved chunks")
-
-            return results
+            # Step 4: Return top-k
+            return results[:k]
 
         except Exception as e:
             logger.error(f"Retrieval failed for query: `{query}`: {e}")
             return []
 
+
+
+    def _rerank_results(self, query: str, chunks: list[RetrievalResult]) -> list[RetrievalResult]:
+        """
+        Reranks retrieved chunks using a Hugging Face cross-encoder.
+        Each chunk must have a 'content' field.
+        Returns chunks sorted by relevance score (descending).
+        """
+        # Prepare input pairs: (query, chunk_text)
+        pairs = [(query, r.content) for r in chunks]
+
+        # Predict raw scores
+        raw_scores = np.array(self.reranker_model.predict(pairs))
+
+        # Normalize
+        min_val, max_val = raw_scores.min(), raw_scores.max()
+        normalized = (raw_scores - min_val) / (max_val - min_val + 1e-8)
+
+        # Attach scores + log per chunk
+        for chunk, raw, norm in zip(chunks, raw_scores, normalized):
+            chunk.metadata["rerank_score"] = float(raw)
+            chunk.metadata["rerank_score_norm"] = float(norm)
+
+            logger.debug(
+                f"Chunk {chunk.chunk_id} | RAW: {raw:.4f} | NORMALIZED: {norm:.4f} | Previous Score: {chunk.metadata['similarity_score']}"
+                f"\nPreview: {chunk.content[:60]}..."
+            )
+
+        # Sort by normalized score
+        return sorted(chunks, key=lambda c: c.metadata["rerank_score_norm"], reverse=True)
+
+
+
     def retrieve_for_summarization(
             self,
-            document_id: str,
+            well_name: Optional[str],
+            document_id: Optional[str],
             max_chunks: int = 20,
             chunk_index_range: Optional[Tuple[int, int]] = None
     ) -> List[RetrievalResult]:
@@ -166,8 +219,13 @@ class DocumentRetriever:
           - Order by page/chunk index (not relevance)
          """
          try:
-            where: Dict[str, int] = {"document_id": document_id}
-            if chunk_index_range:
+            where: Dict[str, any] = {}
+            if document_id:
+                where["document_id"] = document_id
+            elif well_name:
+                where["well_name"] = well_name
+
+            elif chunk_index_range:
                 where["chunk_index"] = {
                     "$gte": chunk_index_range[0],
                     "$lte": chunk_index_range[1]
@@ -190,6 +248,9 @@ class DocumentRetriever:
                     page_number=metadata.get('page_number', 0),
                     document_id=metadata.get('document_id', ''),
                     filename=metadata.get('filename', 'unknown'),
+                    document_type=metadata.get('document_type'),
+                    well_id=metadata.get('well_id', 'unknown'),
+                    well_name=metadata.get('well_name', 'unknown'),
                     similarity_score=1.0,  # Not relevance-based
                     chunk_type=metadata.get('chunk_type', 'text'),
                     metadata=metadata
@@ -199,46 +260,65 @@ class DocumentRetriever:
             # Sort by page and chunk index for logical order
             results.sort(key=lambda x: (x.page_number, x.metadata.get('chunk_index', 0)))
 
-            logger.info(f"Retrieved {len(results)} chunks for summarization")
+            logger.info(f"Retrieved {len(results)} chunks for summarization (well={well_name}, doc={document_id})")
             return results
 
          except Exception as e:
             logger.error(f"Failed to retrieve for summarization: {e}")
             return []
 
+
+
     def retrieve_tables_only(
             self,
             query: str,
+            well_name: Optional[str],
+            document_id: Optional[str],
             top_k: Optional[int] = None,
     ) -> List[RetrievalResult]:
         """
          Retrieve only table chunks (for parameter extraction).
          """
+        filters = {"chunk_type": "table"}
+        if well_name:
+            filters["well_name"] = well_name
+        if document_id:
+            filters["document_id"] = document_id
+
         return self.retrieve(
             query=query,
             top_k=top_k,
-            filters={"chunk_type": "table"}
+            filters=filters,
         )
+
 
 
     def retrieve_from_pages(
             self,
             query: str,
+            well_name: Optional[str],
+            document_id: Optional[str],
             page_numbers: List[int],
             top_k: Optional[int] = None
     ) -> List[RetrievalResult]:
         """
         Retrieve from specific pages only.
         """
-        # ChromaDB filter for page numbers
-        # $in operator: match any of the list values
         page_filter = {"page_number": {"$in": page_numbers}}
+        # $in operator: match any of the list values
+
+        if well_name:
+            page_filter["well_name"] = well_name
+        if document_id:
+            page_filter["document_id"] = document_id
+        # ChromaDB filter for page numbers
 
         return self.retrieve(
             query=query,
             top_k=top_k,
             filters=page_filter,
         )
+
 
 
     def get_context_window(
@@ -281,27 +361,6 @@ class DocumentRetriever:
 
 
 
-    def _rerank_results(self, query: str, chunks: list[RetrievalResult]) -> list[RetrievalResult]:
-        """
-        Reranks retrieved chunks using a Hugging Face cross-encoder.
-        Each chunk must have a 'content' field.
-        Returns chunks sorted by relevance score (descending).
-        """
-        # Prepare input pairs: (query, chunk_text)
-        pairs = [(query, r.content) for r in chunks]
-
-        # Predict relevance scores
-        scores = self.reranker_model.predict(pairs)
-
-        # Attach scores to chunks
-        for chunk, score in zip(chunks, scores):
-            chunk.metadata["rerank_score"] = float(score)
-
-
-        # Sort by score descending
-        return sorted(chunks, key=lambda x: x.metadata["rerank_score"], reverse=True)
-
-
     def format_context_for_llm(
             self,
             results: List[RetrievalResult],
@@ -325,9 +384,10 @@ class DocumentRetriever:
         max_chars = max_tokens * 4 # Rough approximation
 
         for i, result in enumerate(results, 1):
+            citation = result.citation or "No source"
             # Format each chunk
             chunk_text = (
-                f"[Source {i}: {result.citation if result.citation else "No source"}]\n"
+                f"[Source {i}: {citation}]\n"
                 f"{result.content}\n"
             )
 

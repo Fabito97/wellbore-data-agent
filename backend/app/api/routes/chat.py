@@ -10,9 +10,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import uuid
 
+from app.agents.orchestrator import OrchestratedAgent, get_orchestrated_agent
 from app.agents.simple_agent import get_simple_agent, SimpleAgent, AgentResponse as AgentResponseModel
 from app.services.conversation_service import get_conversation_service, ConversationService
 from app.models.message import Message as MessageModel, Message
+from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -52,7 +54,7 @@ class MessageInfo(BaseModel):
 @router.post("/agent", response_model=AgentResponseModel)
 async def chat_with_agent(
     request: ChatRequest,
-    agent: SimpleAgent = Depends(get_simple_agent)
+    agent: OrchestratedAgent = Depends(get_orchestrated_agent)
 ):
     """
     Handles a conversation turn with the RAG agent using a persistent database.
@@ -68,6 +70,7 @@ async def chat_with_agent(
         logger.error(f"Error in agent chat: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.post("/ask", response_model=SimpleChatResponse)
 async def simple_chat(
     request: ChatRequest,
@@ -79,14 +82,14 @@ async def simple_chat(
     and persists the conversation.
     """
     logger.info(f"Simple chat request for conversation_id: {request.conversation_id}")
-    
+    llm = get_llm_service().llm
     try:
         conversation = conversation_service.get_or_create_conversation(request.conversation_id)
         conversation_service.add_message(conversation.id, "user", request.query)
         
         history = conversation_service.get_history(conversation.id)
         
-        llm_response = conversation_service.llm.generate(messages=history)
+        llm_response = llm.generate(messages=history)
         
         llm_message = conversation_service.add_message(conversation.id, "assistant", llm_response.content)
         
@@ -100,6 +103,7 @@ async def simple_chat(
     except Exception as e:
         logger.error(f"Error in simple chat: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/stream")
 async def stream_chat(
@@ -155,6 +159,7 @@ async def get_conversations(
         logger.error(f"Error getting conversations: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not retrieve conversations.")
 
+
 @router.get("/{conversation_id}/messages", response_model=List[MessageInfo])
 async def get_messages(
     conversation_id: str,
@@ -170,6 +175,7 @@ async def get_messages(
     except Exception as e:
         logger.error(f"Error getting messages for conversation {conversation_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not retrieve messages.")
+
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
@@ -189,3 +195,9 @@ async def delete_conversation(
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=500, detail="Could not delete conversation.")
+
+
+@router.delete("/clear")
+def clear_conversations(service: ConversationService = Depends(get_conversation_service)):
+    service.delete_all_conversations()
+    return {"detail": "All conversations deleted"}
