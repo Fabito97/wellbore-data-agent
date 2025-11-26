@@ -143,6 +143,9 @@ class DocumentChunker:
                 chunk_id=self._generate_chunk_id(document.document_id, start_index + i),
                 document_id=document.document_id,
                 content=piece,
+                well_id=document.well_id or "unknown",
+                well_name=document.well_name or "unknown",
+                document_type=document.document_type or "unknown",
                 page_number=page_number,
                 chunk_index=start_index + i,
                 metadata={
@@ -150,7 +153,10 @@ class DocumentChunker:
                     "filename": document.filename,
                     "page_number": page_number,
                     "chunk_type": "text",
-                    "source": "page_content"
+                    "source": "page_content",
+                    "well_id": document.well_id or "unknown",
+                    "well_name": document.well_name or "unknown",
+                    "document_type": document.document_type or "unknown"
                 }
             )
             chunks.append(chunk)
@@ -188,6 +194,9 @@ class DocumentChunker:
                 content=content.strip(),
                 page_number=page_number,
                 chunk_index=start_index + i,
+                well_id=document.well_id or "unknown",
+                well_name=document.well_name or "unknown",
+                document_type=document.document_type or "unknown",
                 metadata={
                     "document_id": document.document_id,
                     "filename": document.filename,
@@ -196,6 +205,9 @@ class DocumentChunker:
                     "column_count": table.column_count,
                     "row_count": table.row_count,
                     "headers": ", ".join(table.headers),
+                    "well_id": document.well_id or "unknown",
+                    "well_name": document.well_name or "unknown",
+                    "document_type": document.document_type or "unknown"
                 }
             )
             chunks.append(chunk)
