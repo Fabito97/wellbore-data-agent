@@ -10,10 +10,10 @@ The agent will:
 import math
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple
-from pydantic import BaseModel, Field
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+name = "nodal_analysis" if __name__ == "__main__" else __name__
+logger = get_logger(name)
 
 
 # ==================== Nodal Analysis Calculator ====================

@@ -1,360 +1,373 @@
 """
-Fixed Wellbore Agent - ReAct (structured) friendly for local LLMs.
+Fixed Agent - Following Organizer's Working Pattern
 
-Key design choices:
-- Tools accept a single dict argument (flat). This avoids nested arg parsing issues.
-- LLM MUST emit JSON like: {"action": "tool_name", "action_input": {"k": 5, ...}}
-- We validate JSON and tool existence before execution.
-- Minimal system prompt to reduce hallucination.
-- Works with local HF/ollama/llama backends (LangChain agent API).
+Key changes:
+1. Use @tool decorated functions DIRECTLY (not wrapped in lambdas)
+2. Simple tool descriptions like organizer's example
+3. Use STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION agent type
+4. Clear system message instead of complex prompt template
 """
-
-import json
-import logging
-from typing import Any, Dict, Callable, List, Optional
-
+from typing import List, Dict, Any
 from langchain_classic.agents import initialize_agent, AgentType
-from langchain_classic.tools import Tool   # adjust if your env uses a different path
-from langchain_classic import LLMChain
-# NOTE: in some langchain versions Tool is in langchain.tools.tool import Tool
-# adjust the import to match your installed version.
+from langchain_core.tools import tool
 
-# Replace with your LLM provider wrapper or service getter
-from app.services.llm_service import get_llm_service  # returns an object with .llm compatible with langchain
-from app.services.document_service import get_document_service
+from app.agents.tools.rag_tool import (
+    list_available_wells,
+    list_available_wells_with_documents,
+    get_well_by_name,
+    rag_query_tool,
+    summarize_well_report_tool,
+    extract_parameters_tool,
+    query_tables_tool
+)
+from app.services.llm_service import get_llm_service
+from app.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-
-# -------------------------
-# ----- Helper helpers -----
-# -------------------------
-def safe_json_parse(s: str) -> Optional[Dict[str, Any]]:
-    """Parse JSON robustly (strip wrapper text) and return dict or None."""
-    if not s:
-        return None
-    s = s.strip()
-    # Try to find a JSON object inside string
-    start = s.find("{")
-    end = s.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    try:
-        return json.loads(s[start:end + 1])
-    except Exception:
-        # last resort: allow single quotes -> double quotes
-        try:
-            return json.loads(s[start:end + 1].replace("'", '"'))
-        except Exception:
-            return None
+logger = get_logger(__name__)
 
 
-def validate_action_payload(payload: Dict[str, Any], tools: Dict[str, Callable]) -> Optional[str]:
+# ==================== Create Wrapper Tools (because original tools need specific signatures) ====================
+
+@tool("list_wells")
+def list_wells_wrapper() -> str:
     """
-    Validate that payload has "action" and "action_input", and action exists.
-    Returns error message string if invalid, otherwise None.
-    """
-    if not isinstance(payload, dict):
-        return "Action must be a JSON object."
-    if "action" not in payload:
-        return "Missing 'action' field."
-    if "action_input" not in payload:
-        return "Missing 'action_input' field."
-    action = payload["action"]
-    if action not in tools:
-        return f"Unknown action '{action}'. Available: {list(tools.keys())}"
-    if not isinstance(payload["action_input"], dict):
-        return "action_input must be a JSON object (dictionary)."
-    return None
-
-
-# -------------------------
-# ----- Tool wrappers -----
-# -------------------------
-# All tools accept a single dict argument and return a string (safe for LLM).
-doc_service = get_document_service()  # singleton in your app
-
-
-def _list_wells_tool(args: Dict[str, Any]) -> str:
-    """
-    No required args. Returns a compact JSON-ish string listing wells.
-    Example args: {}
+    Lists all available wells in the system with document counts.
+    Use when user asks 'what wells are available' or doesn't specify a well.
+    Input: any string (ignored).
     """
     try:
-        wells = doc_service.list_wells()  # returns list of wells (id, name, count)
-        # produce compact line list
-        lines = []
-        for w in wells:
-            lines.append(f"- {w.get('name')} (id={w.get('id')}, docs={w.get('document_count')})")
-        return "WELLS:\n" + ("\n".join(lines) if lines else "No wells found.")
+        wells = list_available_wells.invoke({})
+        return str(wells)
     except Exception as e:
-        logger.exception("list_wells error")
         return f"Error listing wells: {e}"
 
 
-def _get_well_tool(args: Dict[str, Any]) -> str:
+@tool("get_well")
+def get_well_wrapper(well_name: str) -> str:
     """
-    args: {"well_name": "well-1"} or {"well_id": "..."}
-    Returns well metadata JSON string.
-    """
-    try:
-        well_name = args.get("well_name")
-        well_id = args.get("well_id")
-
-        if well_id:
-            wells = doc_service.list_wells()
-            found = next((w for w in wells if w["id"] == well_id), None)
-            if not found:
-                return f"Well with id {well_id} not found."
-            return json.dumps(found, default=str)
-        if well_name:
-            # try normalization and match
-            normalized = well_name.strip().lower().replace(" ", "-")
-            wells = doc_service.list_wells()
-            found = next((w for w in wells if w["name"].lower() == normalized or w["name"].lower() == well_name.lower()), None)
-            if not found:
-                return f"Well with name '{well_name}' not found. Use list_wells to see available wells."
-            return json.dumps(found, default=str)
-
-        return "Provide 'well_name' or 'well_id' in action_input."
-    except Exception as e:
-        logger.exception("get_well error")
-        return f"Error getting well: {e}"
-
-
-def _search_documents_tool(args: Dict[str, Any]) -> str:
-    """
-    args: {"query": "tubing spec", "well_name": "well-1", "top_k": 5}
-    Returns a short summary of top results (text + doc id).
+    Gets details about a specific well to confirm it exists.
+    Use FIRST when user mentions a well name (e.g., 'Well 4', 'well-4').
+    Input: well name like 'well-4' or 'Well 4'.
+    Returns: Well details with exact well_name to use in other tools.
     """
     try:
-        q = args.get("query", "").strip()
-        if not q:
-            return "Provide non-empty 'query' in action_input."
-
-        well_name = args.get("well_name")
-        top_k = int(args.get("top_k", 5))
-
-        # We will call the document service retriever (assumes method exists)
-        # You may need to adapt to your retriever naming: e.g., rag_query_tool or vector_store.search_documents
-        # Attempt to call service.search or service.retrieve_by_well
-        try:
-            results = doc_service.vector_store_vector_search_for_well(q, well_name, top_k)  # placeholder; adapt
-        except Exception:
-            # fallback to generic store search function (adjust to your API)
-            try:
-                results = doc_service.vector_store.query_similar_chunks(q, top_k=top_k, filters={"well_name": well_name})
-            except Exception as e:
-                logger.exception("search_documents fallback error")
-                return f"Search failed: {e}"
-
-        # results expected: list of dicts with 'content', 'chunk_id', 'metadata', 'similarity_score'
-        lines = []
-        for r in results[:top_k]:
-            meta = r.get("metadata", {})
-            filename = meta.get("filename") or meta.get("file_name") or "unknown"
-            snippet = (r.get("content") or "")[:300].replace("\n", " ")
-            lines.append(json.dumps({
-                "doc_id": meta.get("document_id", meta.get("documentId", "")),
-                "filename": filename,
-                "page": meta.get("page_number"),
-                "score": r.get("similarity_score"),
-                "snippet": snippet
-            }, default=str))
-        return "RESULTS:\n" + ("\n".join(lines) if lines else "No results")
+        result = get_well_by_name.invoke({"well_name": well_name})
+        return str(result)
     except Exception as e:
-        logger.exception("search_documents error")
+        return f"Error getting well '{well_name}': {e}"
+
+
+@tool("search_well_documents")
+def search_documents_wrapper(
+        query: str,
+        well_name: str = None,
+        document_id: str = None,
+        chunk_type: str = None,
+        document_type: str = "WELL_REPORT",
+        top_k: int = 5
+) -> str:
+    """
+    Searches well documents. Must use exact well_name from get_well tool.
+    Use for general questions about well data.
+    Inputs:
+        - query: what to search for (e.g., 'tubing depth', 'reservoir pressure')
+        - well_name: exact well name from get_well (e.g., 'well-4')
+        - top_k: number of results (default 5)
+    """
+    try:
+        result = rag_query_tool.invoke({
+            "query": query,
+            "well_name": well_name,
+            "document": document_id,
+            "document_type": document_type,
+            "chunk_type": chunk_type,
+            "top_k": top_k
+        })
+
+        # Format nicely for agent
+        results_list = result.get("results", [])
+        if not results_list:
+            return f"No results found for query '{query}' in {well_name}"
+
+        formatted = f"Found {len(results_list)} results:\n\n"
+        for i, r in enumerate(results_list[:3], 1):  # Show top 3
+            formatted += f"{i}. {r.content[:200]}...\n"
+
+        return formatted
+    except Exception as e:
         return f"Error searching documents: {e}"
 
+#
+# @tool("get_summary_context")
+# def summary_wrapper(well_name: str) -> str:
+#     """
+#     Gets comprehensive document context to summarize a well report.
+#     Use when user asks to 'summarize' or 'describe' a well.
+#     Input: exact well name from get_well (e.g., 'well-4').
+#     """
+#     try:
+#         result = summarize_well_report_tool.invoke({
+#             "well_name": well_name,
+#             "max_words": 200
+#         })
+#
+#         context = result.get("context", "")
+#         chunks = result.get("chunks_used", 0)
+#
+#         return f"Retrieved {chunks} document chunks for {well_name}:\n\n{context[:1000]}..."
+#     except Exception as e:
+#         return f"Error getting summary context: {e}"
 
-def _summarize_well_tool(args: Dict[str, Any]) -> str:
-    """
-    args: {"well_name": "well-1", "max_words": 200}
-    Returns a short combined context string (we keep it sized).
-    """
-    try:
-        well_name = args.get("well_name")
-        if not well_name:
-            return "Provide well_name"
+#
+# @tool("extract_parameters")
+# def parameters_wrapper(well_name: str) -> str:
+#     """
+#     Extracts nodal analysis parameters from well documents.
+#     Use when user asks to 'extract parameters' or needs data for nodal analysis.
+#     Input: exact well name from get_well (e.g., 'well-4').
+#     Returns: Tables and text containing tubing specs, reservoir pressure, fluid properties, etc.
+#     """
+#     try:
+#         result = extract_parameters_tool.invoke({"well_name": well_name})
+#
+#         context = result.get("context", "")
+#         tables = result.get("table_chunks", [])
+#
+#         return f"Extracted parameter data for {well_name}:\n{len(tables)} tables found\n\n{context[:1500]}..."
+#     except Exception as e:
+#         return f"Error extracting parameters: {e}"
 
-        max_words = int(args.get("max_words", 200))
-
-        # Use your existing summarize function if present:
-        try:
-            summary_resp = doc_service.summarize_well_reports(well_name=well_name, max_words=max_words)
-            # assume returns dict with 'summary' or similar
-            if isinstance(summary_resp, dict):
-                return summary_resp.get("summary", str(summary_resp))
-            return str(summary_resp)
-        except Exception:
-            # fallback: do a small search for "summary" kind of results
-            results = doc_service.vector_store.query_similar_chunks("summary " + well_name, top_k=5, filters={"well_name": well_name})
-            combined = " ".join((r.get("content") or "") for r in results[:5])
-            words = combined.split()
-            return " ".join(words[:max_words]) if words else "No summarizable text found."
-
-    except Exception as e:
-        logger.exception("summarize_well error")
-        return f"Error summarizing well: {e}"
-
-
-def _extract_parameters_tool(args: Dict[str, Any]) -> str:
-    """
-    args: {"well_name": "well-1"}
-    Returns extracted parameters in JSON-ish string.
-    """
-    try:
-        well_name = args.get("well_name")
-        if not well_name:
-            return "Provide well_name"
-
-        # Try to call document service's parameter extraction
-        try:
-            params = doc_service.extract_parameters_for_well(well_name=well_name)
-            if isinstance(params, dict):
-                return json.dumps(params, default=str)
-            return str(params)
-        except Exception:
-            # fallback: run targeted searches for common parameters and assemble approximate JSON
-            searches = ["tubing", "reservoir pressure", "fluid gravity", "productivity index"]
-            out = {}
-            for s in searches:
-                results = doc_service.vector_store.query_similar_chunks(s + " " + well_name, top_k=3, filters={"well_name": well_name})
-                out[s] = [(r.get("metadata", {}).get("document_id"), (r.get("content") or "")[:200]) for r in results]
-            return json.dumps(out, default=str)
-
-    except Exception as e:
-        logger.exception("extract_parameters error")
-        return f"Error extracting parameters: {e}"
+#
+# @tool("validate_nodal_parameters")
+# def validate_wrapper(parameters: str) -> str:
+#     """
+#     Validates if extracted parameters are sufficient for nodal analysis.
+#     Input: JSON string of parameters like '{"tubing_id": 2.875, "reservoir_pressure": 3500, ...}'.
+#     Returns: validation result listing missing required parameters.
+#     """
+#     import json
+#
+#     try:
+#         params = json.loads(parameters)
+#     except:
+#         return "Error: Invalid JSON format"
+#
+#     required = [
+#         "tubing_id",
+#         "tubing_depth",
+#         "reservoir_pressure",
+#         "oil_gravity",
+#         "productivity_index"
+#     ]
+#
+#     missing = [p for p in required if p not in params or params[p] is None]
+#
+#     if not missing:
+#         return "✓ All required parameters present. Ready for nodal analysis."
+#     else:
+#         return f"✗ Missing required parameters: {', '.join(missing)}"
 
 
-# Map tool names -> callables
-_TOOL_MAP: Dict[str, Callable[[Dict[str, Any]], str]] = {
-    "list_wells": _list_wells_tool,
-    "get_well": _get_well_tool,
-    "search_documents": _search_documents_tool,
-    "summarize_well": _summarize_well_tool,
-    "extract_parameters": _extract_parameters_tool,
+# ==================== Agent System Message ====================
+
+SYSTEM_MESSAGE = """You are a wellbore analysis expert assistant with access to well completion reports.
+
+WORKFLOW - Always follow this order:
+
+1. IDENTIFY THE WELL:
+   - If user mentions a well name (e.g., "Well 4"), use get_well tool first to confirm it exists
+   - If no well mentioned, use list_wells and ask user which well
+   - ALWAYS use the exact well_name returned by get_well in subsequent queries
+
+2. ANSWER THE QUESTION:
+   - For specific questions: search_well_documents with appropriate query
+   - For "what's the tubing depth": search_well_documents(query="tubing depth", well_name="well-4")
+
+3. FORMAT YOUR RESPONSE:
+   - Be concise and specific
+   - Include relevant data values
+   - For parameters, format as a clear list if more than one
+   - If data is missing, explicitly state what's missing
+
+IMPORTANT:
+- IMPORTANT: When calling tools, always format the action as valid JSON with quoted keys and values.
+Example:
+{
+  "action": "search_well_documents",
+  "action_input": {
+    "query": "tubing depth",
+    "well_name": "well-1"
+  }
 }
+- Use exact well names from get_well tool (e.g., "well-4" not "Well 4")
+- Don't make up data - only use what the tools return
+- If a tool returns an error, explain it to the user clearly
 
-
-# Build LangChain Tool objects for agent registration (descriptions short)
-TOOL_REGISTRY: List[Tool] = [
-    Tool(name="list_wells", func=_list_wells_tool, description="List wells. action_input: {}"),
-    Tool(name="get_well", func=_get_well_tool, description="Get well metadata. action_input: {\"well_name\": \"well-1\"}"),
-    Tool(name="search_documents", func=_search_documents_tool, description="Search documents for a well. action_input: {\"query\":\"...\",\"well_name\":\"well-1\",\"top_k\":5}"),
-    Tool(name="summarize_well", func=_summarize_well_tool, description="Summarize well reports. action_input: {\"well_name\":\"well-1\",\"max_words\":200}"),
-    Tool(name="extract_parameters", func=_extract_parameters_tool, description="Extract nodal parameters. action_input: {\"well_name\":\"well-1\"}"),
-]
-
-
-# -------------------------
-# ----- Agent factory -----
-# -------------------------
-SYSTEM_PROMPT = """
-You are a concise wellbore assistant. When you call a tool, you MUST output exactly ONE JSON object (no extra commentary).
-The JSON must be: {"action": "<tool_name>", "action_input": { ... } }.
-
-Rules:
-- Use `get_well` if a well is mentioned, or `list_wells` if no well mentioned.
-- Keep action_input flat (no nested objects).
-- If unsure, ask a clarifying question (do NOT call tools).
-- Do not invent numbers. Use tools to fetch data.
-
-Examples:
-{"action":"list_wells","action_input":{}}
-{"action":"get_well","action_input":{"well_name":"well-1"}}
-{"action":"search_documents","action_input":{"query":"tubing specification","well_name":"well-1","top_k":5}}
+Available tools will help you query well documents.
 """
 
-def build_agent() -> Any:
+
+# ==================== Wellbore Agent Class ====================
+
+class QueryAgent:
     """
-    Build and return a LangChain agent configured for structured ReAct.
+    Wellbore analysis agent using LangChain's structured chat agent.
+
+    This follows the organizer's working pattern from the hackathon example.
     """
-    llm_wrapper = get_llm_service().llm  # must be compatible with langchain LLM
-    # initialize_agent expects `tools` and an LLM instance
-    agent = initialize_agent(
-        tools=TOOL_REGISTRY,
-        llm=llm_wrapper,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        handle_parsing_errors=True,
-        agent_kwargs={"system_message": SYSTEM_PROMPT},
-        max_iterations=8,
-        max_execution_time=60
-    )
-    return agent
+
+    def __init__(self):
+        """Initialize agent with tools and LLM."""
+
+        # Get LLM from service
+        self.llm = get_llm_service().llm
+
+        # Create tools list
+        self.tools = [
+            list_wells_wrapper,
+            get_well_wrapper,
+            search_documents_wrapper,
+            # summary_wrapper,
+            # parameters_wrapper,
+            # validate_wrapper
+        ]
+
+        # Initialize agent using organizer's pattern
+        self.agent = initialize_agent(
+            tools=self.tools,
+            llm=self.llm,
+            agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+            verbose=True,
+            handle_parsing_errors=(
+                "Invalid action format. Use proper JSON:\n"
+                "{\n"
+                '  "action": "tool_name",\n'
+                '  "action_input": {"param": "value"}\n'
+                "}\n"
+                "Remember: Quote all keys and string values!"
+            ),
+
+            agent_kwargs={"system_message": SYSTEM_MESSAGE},
+            max_iterations=15,
+            max_execution_time=300
+        )
+
+        logger.info(f"✓ WellboreAgent initialized with {len(self.tools)} tools")
+        logger.info(f"  Tools: {[t.name for t in self.tools]}")
+
+    def run(self, query: str) -> Dict[str, Any]:
+        """
+        Run agent on user query.
+
+        Args:
+            query: User's question
+
+        Returns:
+            {
+                "output": str,
+                "success": bool,
+                "error": str (if failed)
+            }
+        """
+        logger.info("=" * 80)
+        logger.info(f"Processing: '{query}'")
+        logger.info("=" * 80)
+
+        try:
+            # Invoke agent (organizer's pattern)
+            result = self.agent.invoke(query)
+
+            # Extract output
+            output = result.get("output", "No response generated")
+
+            logger.info("✓ Agent completed successfully")
+
+            return {
+                "output": output,
+                "success": True
+            }
+
+        except Exception as e:
+            logger.error(f"✗ Agent failed: {e}", exc_info=True)
+
+            return {
+                "output": f"I encountered an error: {str(e)}",
+                "success": False,
+                "error": str(e)
+            }
 
 
-# -------------------------
-# ----- Runner / helper ----
-# -------------------------
-def run_query(agent, user_question: str) -> Dict[str, Any]:
-    """
-    Run the agent in a defensive loop:
-    1) Get agent raw output (string)
-    2) Parse JSON action
-    3) Validate payload
-    4) Execute tool and return observation
-    If the agent returns a final answer instead of an action, return it.
-    """
-    logger.info("User question: %s", user_question)
+# ==================== Interactive Terminal ====================
 
-    # invoke agent to produce an action in a single step (agent.invoke may return dict or object)
-    # We call the agent but will validate its textual output before running tools for safety.
-    try:
-        raw = agent.invoke(user_question)
-    except Exception as e:
-        logger.exception("Agent.invoke error")
-        return {"success": False, "error": f"Agent invocation error: {e}"}
+def interactive_mode():
+    """Run agent in interactive terminal mode."""
+    print("\n" + "=" * 80)
+    print("QUERY AGENT - Interactive Mode")
+    print("=" * 80)
+    print("\nThis agent answers questions about well data.")
+    print("Type 'exit' or 'quit' to stop.\n")
 
-    # langchain agent.invoke may return a dict with "output" or similar; attempt to extract
-    text_output = None
-    if isinstance(raw, dict):
-        text_output = raw.get("output") or raw.get("text") or str(raw)
-    else:
-        text_output = str(raw)
+    agent = QueryAgent()
 
-    logger.debug("Agent raw output: %s", text_output[:1000])
+    while True:
+        try:
+            # Get user input
+            user_input = input("\nYou: ").strip()
 
-    # Try to parse JSON action
-    payload = safe_json_parse(text_output)
-    if not payload:
-        # LLM didn't return action JSON - treat as final answer text
-        return {"success": True, "final_answer": text_output}
+            if not user_input:
+                continue
 
-    # Validate
-    err = validate_action_payload(payload, _TOOL_MAP)
-    if err:
-        # If invalid, return message and raw LLM output so you can inspect
-        return {"success": False, "error": f"Invalid tool call: {err}", "raw": text_output}
+            if user_input.lower() in ['exit', 'quit', 'q']:
+                print("\nGoodbye!")
+                break
 
-    # Execute tool
-    action = payload["action"]
-    args = payload["action_input"]
-    func = _TOOL_MAP[action]
-    logger.info("Executing tool %s with args %s", action, args)
-    try:
-        obs = func(args)
-        # Provide the tool observation back in a safe structure for client or further chaining
-        return {"success": True, "action": action, "observation": obs}
-    except Exception as e:
-        logger.exception("Tool execution error")
-        return {"success": False, "error": f"Tool execution failed: {e}"}
+            # Process question
+            print("\nAgent: ", end="", flush=True)
+            answer = agent.run(user_input)
+            print(answer)
+
+        except KeyboardInterrupt:
+            print("\n\nGoodbye!")
+            break
+        except Exception as e:
+            print(f"\nError: {e}")
 
 
-# -------------------------
-# ----- Quick demo/test ----
-# -------------------------
-if __name__ == "__main__":
-    agent = build_agent()
-    queries = [
-        "List wells available",
-        "What is the tubing specification for well-1?",
-        "Summarize the well-1 completion report in 150 words"
+# ==================== Example Usage ====================
+
+def test_agent():
+    """Test the agent with various queries."""
+
+    agent = QueryAgent()
+
+    test_queries = [
+        "List all available wells",
+        "What's the reservoir pressure?",  # No well specified
+        "What is the tubing depth for Well 1?",
+        "Summarize the completion report for well-1",
+        "Extract nodal analysis parameters for Well 1",
     ]
-    for q in queries:
-        print("\n\n>> QUERY:", q)
-        out = run_query(agent, q)
-        print("OUT:", json.dumps(out, indent=2, default=str))
+
+    for query in test_queries:
+        print("\n" + "=" * 80)
+        print(f"QUERY: {query}")
+        print("=" * 80)
+
+        result = agent.run(query)
+
+        print("\nRESULT:")
+        print(result["output"])
+        print("\nSTATUS:", "✓ Success" if result["success"] else "✗ Failed")
+
+        if not result["success"]:
+            print("ERROR:", result.get("error"))
+
+
+if __name__ == "__main__":
+    import sys
+
+    # Check if user wants interactive mode or test mode
+    if len(sys.argv) > 1 and sys.argv[1] == "-test":
+        test_agent()
+    else:
+        interactive_mode()

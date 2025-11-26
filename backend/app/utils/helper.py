@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+from typing import Optional
+
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,3 +36,35 @@ def normalize_well_name(raw_name: str) -> str:
     # Standardize format
 
     return f"well-{name}"
+
+
+def detect_well_from_query(query: str) -> Optional[str]:
+    """
+    Use this tool to extract well reference from user query.
+
+    Input:
+        query (str): The user's query string.
+
+    Returns:
+        Normalized well name (e.g., "well-4") or None
+    """
+    query_lower = query.lower()
+
+    # Pattern 1: "well 4", "well-4", "well_4"
+    match = re.search(r'\bwell[\s\-_]*(\d+)\b', query_lower)
+    if match:
+        well_num = match.group(1).lstrip('0') or '0'
+        normalized = f"well-{well_num}"
+        logger.info(f"Detected well from query: {normalized}")
+        return normalized
+
+    # Pattern 2: "w4", "w-4"
+    match = re.search(r'\bw[\s\-_]*(\d+)\b', query_lower)
+    if match:
+        well_num = match.group(1).lstrip('0') or '0'
+        normalized = f"well-{well_num}"
+        logger.info(f"Detected well from query (short form): {normalized}")
+        return normalized
+
+    logger.debug("No well reference detected in query")
+    return None

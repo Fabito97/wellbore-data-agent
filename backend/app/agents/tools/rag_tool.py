@@ -15,10 +15,11 @@ from langchain_core.tools import tool
 
 from app.core.database import SessionLocal
 from app.rag.retriever import get_retriever
-from app.services.document_service import DocumentService
+from app.services.document_service import DocumentService, get_document_service
 from app.utils.helper import normalize_well_name
 
 from app.utils.logger import get_logger
+from app.agents.tools.nodal_tool import run_nodal_analysis_tool
 import re
 
 logger = get_logger(__name__)
@@ -39,7 +40,7 @@ def _get_service():
     if _document_service is None:
         # Create a DB session and DocumentService once
         db = SessionLocal()
-        _document_service = DocumentService(db=db)
+        _document_service = get_document_service(db=db)
     return _document_service
 
 def _get_retriever():
@@ -54,13 +55,10 @@ def _get_retriever():
 @tool('detect_well_tool')
 def detect_well_from_query(query: str) -> Optional[str]:
     """
-    Extract well reference from user query.
+    Use this tool to extract well reference from user query.
 
-    Handles:
-    - "What's the tubing depth for Well 4?"
-    - "Analyze well-4"
-    - "Tell me about W4"
-    - "WELL_004 parameters"
+    Input:
+        query (str): The user's query string.
 
     Returns:
         Normalized well name (e.g., "well-4") or None
@@ -134,10 +132,10 @@ def list_available_wells_with_documents() -> List[Dict[str, Any]]:
 
 
 
-@tool('get_well')
-def get_well_by_name(well_name: str) -> List[Dict[str, Any]]:
+@tool('get_well_by_name')
+def get_well_by_name(well_name: str) -> Dict[str, Any]:
     """
-    Get a well record by (normalized) name.
+    Use this to get a well record including its documents by (normalized) name.
 
     Input:
       - well_name (str): free-form well identifier (e.g. "Well 4", "W4", "well-4").
@@ -151,11 +149,6 @@ def get_well_by_name(well_name: str) -> List[Dict[str, Any]]:
         "document_count": int,
         "documents": [{"document_id": "...", "filename": "...", "document_type": "..."}, ...]
       }
-
-    Usage for LLM/agent:
-      - The agent should call this tool when it has identified a well reference and needs
-        the list of documents or basic metadata for downstream retrieval or summarization.
-      - Example: get_well_by_name("Well 4") -> returned dict can be inspected for document ids to fetch content.
     """
     service = _get_service()  # Use the singleton
     return service.get_well(well_name=well_name)
@@ -166,16 +159,13 @@ def get_well_by_name(well_name: str) -> List[Dict[str, Any]]:
 def rag_query_tool(
     query: str,
     well_name: Optional[str] = None,
+    document_id: Optional[str] = None,
     document_type: Optional[str] = None,
     top_k: int = 5,
     chunk_type: Optional[str] = None  # "text" or "table"
 ) -> Dict[str, Any]:
     """
-    General RAG query with optional filtering.
-
-    This function is intended to be exposed to an agent/LLM as a tool. The tool returns
-    a compact JSON-serializable structure with matching retrieval results and metadata so
-    the agent can decide how to use them.
+    Use this to make a general RAG query with optional filtering.
 
     Inputs:
       - query (str): Natural language query.
@@ -192,15 +182,6 @@ def rag_query_tool(
         "document_type": str | None,
         "query": str
       }
-
-    Example usage (agent):
-      tool_call = rag_query_tool(query="tubing inner diameter", well_name="well-4", top_k=5)
-      if tool_call['count'] > 0:
-          # inspect tool_call['results'] and include top results in the final prompt
-
-    Notes:
-      - Returns the raw RetrievalResult objects (not stringified) so the agent code can
-        format them for the LLM. RetrievalResult fields include content, filename, page_number.
     """
     logger.info(f"RAG query: '{query}' (well: {well_name}, type: {document_type})")
 
@@ -208,6 +189,8 @@ def rag_query_tool(
     filters = {}
     if well_name:
         filters["well_name"] = normalize_well_name(well_name)
+    if document_id:  # ADD THIS
+        filters["document_id"] = document_id
     if document_type:
         filters["document_type"] = document_type
     if chunk_type:
@@ -223,7 +206,7 @@ def rag_query_tool(
 
     logger.info(f"Retrieved {len(results)} results")
 
-    if results and results > 0:
+    if results and len(results) > 0:
         retriever.format_context_for_llm(results)
     return {
          "results": results,
@@ -243,7 +226,7 @@ def summarize_well_report_tool(
     max_words: int = 200
 ) -> Dict[str, Any]:
     """
-    Summarize a well report (Sub-challenge 1).
+    Use this to summarize a well report (Sub-challenge 1).
 
     Args:
         well_name: Well to summarize (e.g., "well-4")
@@ -257,11 +240,6 @@ def summarize_well_report_tool(
             "context": str,  # Full text for LLM to summarize
             "document_ids": [...]
         }
-
-    Agent workflow:
-        1. Agent calls: summarize_well_report_tool("well-4")
-        2. Tool returns context from well-4 documents
-        3. Agent generates summary using LLM
     """
     logger.info(f"Summarizing well report: {well_name}")
 
@@ -493,6 +471,21 @@ AGENT_TOOLS = {
         "description": "Extract nodal analysis parameters from well report",
         "parameters": {
             "well_name": {"type": "string", "required": True}
+        }
+    },
+
+    "nodal_analysis": {
+        "function": run_nodal_analysis_tool,
+        "description": "Run nodal analysis given explicit parameters (reservoir pressure and PI are required).",
+        "parameters": {
+            "reservoir_pressure": {"type": "number", "required": True, "description": "Reservoir pressure (bar or psi)"},
+            "productivity_index": {"type": "number", "required": True, "description": "Productivity index (m3/hr per bar)"},
+            "tubing_id": {"type": "number", "required": False, "description": "Tubing inner diameter (inches)"},
+            "tubing_depth": {"type": "number", "required": False, "description": "Tubing depth (ft or m)"},
+            "oil_gravity": {"type": "number", "required": False, "description": "API gravity"},
+            "wellhead_pressure": {"type": "number", "required": False, "description": "Wellhead pressure (bar or psi)"},
+            "pump_curve": {"type": "object", "required": False, "description": "Optional pump curve dict with 'flow' and 'head' lists"},
+            "return_curves": {"type": "boolean", "required": False, "description": "Include VLP/IPR curves in response"}
         }
     },
 

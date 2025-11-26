@@ -179,6 +179,7 @@ class DocumentRetriever:
         Each chunk must have a 'content' field.
         Returns chunks sorted by relevance score (descending).
         """
+        logger.debug("Reranking results...")
         # Prepare input pairs: (query, chunk_text)
         pairs = [(query, r.content) for r in chunks]
 
@@ -195,7 +196,7 @@ class DocumentRetriever:
             chunk.metadata["rerank_score_norm"] = float(norm)
 
             logger.debug(
-                f"Chunk {chunk.chunk_id} | RAW: {raw:.4f} | NORMALIZED: {norm:.4f} | Previous Score: {chunk.metadata['similarity_score']}"
+                f"Chunk {chunk.chunk_id} | RAW: {raw:.4f} | NORMALIZED: {norm:.4f} | Previous Score: {chunk.similarity_score}"
                 f"\nPreview: {chunk.content[:60]}..."
             )
 

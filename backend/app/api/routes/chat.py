@@ -10,7 +10,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import uuid
 
-from app.agents.orchestrator import OrchestratedAgent, get_orchestrated_agent
 from app.agents.simple_agent import get_simple_agent, SimpleAgent, AgentResponse as AgentResponseModel
 from app.services.conversation_service import get_conversation_service, ConversationService
 from app.models.message import Message as MessageModel, Message
@@ -54,7 +53,7 @@ class MessageInfo(BaseModel):
 @router.post("/agent", response_model=AgentResponseModel)
 async def chat_with_agent(
     request: ChatRequest,
-    agent: OrchestratedAgent = Depends(get_orchestrated_agent)
+    agent: SimpleAgent = Depends(get_simple_agent)
 ):
     """
     Handles a conversation turn with the RAG agent using a persistent database.

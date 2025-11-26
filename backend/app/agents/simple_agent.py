@@ -9,6 +9,11 @@ The agent can:
 
 Uses modern LangChain create_agent (no AgentExecutor needed).
 """
+from langchain_classic.agents import create_tool_calling_agent
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
+
 from app.utils.logger import get_logger
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -144,15 +149,15 @@ def get_parameter_context(well_name: str) -> str:
 # ==================== Agent Response Model ====================
 
 @dataclass
-class AgentResponse:
+class AgentResponse(BaseModel):
     """Response from agent."""
     answer: str
     sources: List[str]  # Simplified - just source names
-    conversation_id: str
+    # conversation_id: str
     confidence: str
     well_name: Optional[str] = None
     tool_calls: int = 0
-    token_usage: Optional[Dict[str, int]] = None
+    # token_usage: Optional[Dict[str, int]] = None
 
 # ==================== Simple Agent with Tools ====================
 
@@ -169,11 +174,11 @@ class SimpleAgent:
     def __init__(
         self,
         llm_service: LLMService,
-        conversation_service: ConversationService,
+        # conversation_service: ConversationService,
         retriever: DocumentRetriever
     ):
         self.llm_service = llm_service
-        self.conversations = conversation_service
+        # self.conversations = conversation_service
         self.retriever = retriever
 
 
@@ -194,13 +199,33 @@ class SimpleAgent:
             model=settings.OLLAMA_MODEL,
             temperature=0.1  # Deterministic for tool usage
         )
+        self.parser = PydanticOutputParser(pydantic_object=AgentResponse)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    """
+                    You are a research assistant that will help generate a research paper.
+                    Answer the user query and use necessary tools. 
+                    Wrap the output in this format and provide no other text\n{format_instructions}
+                    It is important to use the date tool to get exact date for queries when necessary
+                    Always output valid json
+                    """,
+                ),
+                ("placeholder", "{chat_history}"),
+                ("human", "{query}"),
+                ("placeholder", "{agent_scratchpad}")
+            ]
+        ).partial(format_instructions=self.parser.get_format_instructions())
 
         # Create agent
-        self.agent = create_agent(
-            model=self.llm,
+        self.agent = create_tool_calling_agent(
+            llm=self.llm,
             tools=self.tools,
-            system_prompt=AGENT_PROMPT
+            prompt=prompt
         )
+
+
 
         logger.info("SimpleAgent initialized with RAG tools")
 
@@ -221,51 +246,50 @@ class SimpleAgent:
         """
         logger.info(f"Agent processing: '{question[:100]}...'")
 
-        # Get conversation
-        conversation = self.conversations.get_or_create_conversation(conversation_id)
-        self.conversations.add_message(conversation.id, "user", question)
+        # # Get conversation
+        # conversation = self.conversations.get_or_create_conversation(conversation_id)
+        # self.conversations.add_message(conversation.id, "user", question)
 
         try:
             # Invoke agent
-            result = self.agent.invoke(
-                {"messages": [{"role": "user", "content": question}]}
-            )
+            result = self.agent.invoke({'query': question})
 
             # Extract answer from agent response
-            answer = self._extract_answer(result)
-
+            # answer = self._extract_answer(result)
+            response = self.parser.parse(result.get("output"))
+            logger.info(f"Response: {response}")
             # Detect well from original question (for metadata)
             # well_name = detect_well_from_query(query=question)
 
             # Count tool calls
-            tool_calls = self._count_tool_calls(result)
+            # tool_calls = self._count_tool_calls(result)
 
             # Save response
-            self.conversations.add_message(conversation.id, "assistant", answer)
+            # self.conversations.add_message(conversation.id, "assistant", answer)
 
             # Assess confidence
-            confidence = self._assess_confidence(answer, tool_calls)
+            # confidence = self._assess_confidence(answer, tool_calls)
 
-            logger.info(f"Agent completed: {tool_calls} tool calls, confidence={confidence}")
+            # logger.info(f"Agent completed: {tool_calls} tool calls, confidence={confidence}")
 
             return AgentResponse(
-                answer=answer,
-                sources=[],  # Simplified for now
-                conversation_id=conversation.id,
-                confidence=confidence,
-                # well_name=well_name,
-                tool_calls=tool_calls
+                answer=response.answer,
+                sources=response.sources or [],  # Simplified for now
+                # conversation_id=conversation.id,
+                confidence=response.confidence,
+                well_name=response.well_name,
+                tool_calls=response.tool_calls
             )
 
         except Exception as e:
             logger.error(f"Agent error: {e}", exc_info=True)
             error_msg = f"I encountered an error: {str(e)}"
-            self.conversations.add_message(conversation.id, "assistant", error_msg)
+            # self.conversations.add_message(conversation.id, "assistant", error_msg)
 
             return AgentResponse(
                 answer=error_msg,
                 sources=[],
-                conversation_id=conversation.id,
+                # conversation_id=conversation.id,
                 confidence="low"
             )
 
@@ -317,7 +341,7 @@ def get_simple_agent(
     """FastAPI dependency to get agent."""
     return SimpleAgent(
         llm_service=llm_service,
-        conversation_service=conversation_service,
+        # conversation_service=conversation_service,
         retriever=retriever
     )
 
@@ -335,7 +359,7 @@ def test_agent():
     db = SessionLocal()
     agent = SimpleAgent(
         llm_service=get_llm_service(),
-        conversation_service=get_conversation_service(db),
+        # conversation_service=get_conversation_service(db),
         retriever=get_retriever()
     )
 
@@ -346,7 +370,7 @@ def test_agent():
     # Test 1: Well detection + search
     print("\n📋 Test 1: Simple Query")
     print("-" * 80)
-    response = agent.answer("What is the tubing depth for Well 4?")
+    response = agent.answer("What is the tubing depth for Well 1?")
     print(f"Answer: {response.answer}")
     print(f"Well detected: {response.well_name}")
     print(f"Tool calls: {response.tool_calls}")
