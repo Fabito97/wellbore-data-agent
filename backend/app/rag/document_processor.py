@@ -18,9 +18,9 @@ from pdfplumber.page import Page as PDFPage
 from app.utils.logger import get_logger
 from app.core.config import settings
 from app.models.document import DocumentChunk, PageContent, TableData, DocumentContent, TableExtractionMethod, \
-    DocumentStatus, DocumentFormat
+    DocumentStatus, DocumentFormat, ImageData
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 import fitz
 import uuid
 
@@ -88,7 +88,7 @@ class DocumentProcessor:
             document_id: Optional[str] = None,
             well_name: Optional[str] = None,
             well_id: Optional[str] = None,
-            document_type: Optional[str] = None
+            document_type: Optional[str] = None,
     ) -> DocumentContent:
         """
         Main entry point: Call to process a PDF file completely
@@ -112,7 +112,8 @@ class DocumentProcessor:
             raise FileNotFoundError(f"PDF file not found: {file_path}")
 
         if file_path.suffix.lower() != '.pdf':
-            raise ValueError(f"File must be a PDF, got: {file_path.suffix}")
+            logger.info(f"Skipping non-PDF file: {file_path.name}")
+            return None
 
         # Generate ID if not provided
         if document_id is None:
@@ -137,7 +138,6 @@ class DocumentProcessor:
                 status=DocumentStatus.PROCESSED,
                 processing_time_seconds=processing_time,
                 extraction_method=self.table_method,
-                file_format=DocumentFormat.PDF,
                 well_name=well_name,
                 well_id=well_id,
                 document_type=document_type,
@@ -158,57 +158,118 @@ class DocumentProcessor:
         Extract content from all pages - Not meant to be called externally
         """
         pages = []
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(file_path)
+            total_pages = doc.page_count
+            logger.debug(f"Extracting {total_pages} pages with PyMuPDF from {file_path.name}")
 
-        # Open PDF with pdfplumber (easier API for tables)
-        with pdfplumber.open(file_path) as pdf:
-            total_pages = len(pdf.pages)
-
-            logger.debug(f"Extracting {total_pages} pages from {file_path.name}")
-
-            for page_num, page in enumerate(pdf.pages, start=1):
+            for page_num in range(total_pages):
+                page = doc[page_num]
                 try:
-                    page_content = self._extract_page_content(page, page_num)
+                    page_content = self._extract_page_content(page_num + 1, ("pymupdf", page),  file_path)
                     pages.append(page_content)
-
                 except Exception as e:
-                    # Don't fail entire document for one bad page
-                    logger.warning(f"Failed to extract page {page_num}: {e}")
-                    # Add empty page content to maintain page numbering
-                    pages.append(PageContent(
-                        page_number=page_num,
-                        text=f"[Error extracting page {page_num}]",
-                        tables=[]
-                    ))
+                    logger.warning(f"PyMuPDF failed for page {page_num + 1}: {e}")
+                    # fallback to pdfplumber for this page
+                    with pdfplumber.open(file_path) as pdf:
+                        fallback_page = pdf.pages[page_num]
+                        page_content = self._extract_page_content(page_num + 1, ("pdfplumber", page), file_path)
+                        pages.append(page_content)
+
+        except Exception as e:
+            # Open PDF with pdfplumber (easier API for tables)
+            with pdfplumber.open(file_path) as pdf:
+                total_pages = len(pdf.pages)
+
+                logger.debug(f"Extracting {total_pages} pages from {file_path.name}")
+
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    try:
+                        page_content = self._extract_page_content(page_num, ("pdfplumber", page), file_path)
+                        pages.append(page_content)
+
+                    except Exception as e:
+                        # Don't fail entire document for one bad page
+                        logger.warning(f"Failed to extract page {page_num}: {e}")
+                        # Add empty page content to maintain page numbering
+                        pages.append(PageContent(
+                            page_number=page_num,
+                            text=f"[Error extracting page {page_num}]",
+                            tables=[]
+                        ))
 
         return pages
 
 
-    def _extract_page_content(self, page: PDFPage, page_number: int, file_path: Optional[Path] = None) -> PageContent:
+    def _extract_page_content(
+            self,
+            page_number: int,
+            page_obj = Tuple[str, Union[fitz.Page, pdfplumber.page.Page]],
+            file_path: Optional[Path] = None
+    ) -> PageContent:
         """
         Extract text and tables from a single page
 
         Args:
-            page: pdfplumber Page object
+            page_obj: pdfplumber Page object or pymupdf Page object
             page_number: 1-indexed page numbe
 
         Returns:
             PageContent with text and table
         """
         # Extract text
-        text = page.extract_text() or ""
+        """
+           Extract text, tables, and images from a single page.
+           page_obj is a tuple: (source, page)
+             - source: "pymupdf" or "pdfplumber"
+             - page: actual page object
+           """
+
+        source, page = page_obj
+        text = ""
+        has_images = False
+        images: List[ImageData] = []
+
+        # --- Text + Images ---
+        if source == "pymupdf":
+            text = page.get_text("text") or ""
+            has_images = len(page.get_images(full=True)) > 0
+            if has_images:
+                images.extend(self._extract_images(page, page_number, file_path))
+
+        elif source == "pdfplumber":
+            text = page.extract_text() or ""
+            has_images = len(page.images) > 0
 
         # Check if page might be scanned (optional)
         word_count = len(text.split())
-        is_scanned = word_count < 30  # Heuristic
+        has_text_layer = word_count > 0
+        is_scanned = not has_text_layer and has_images  # Heuristic
         ocr_confidence = None
 
         # OCR fallback if enabled and page looks scanned
         if is_scanned and self.enable_ocr and self.ocr_available and file_path:
             logger.debug(f"Page {page_number} appears scanned, applying OCR")
+
             try:
-                ocr_text, ocr_confidence = self._ocr_page(file_path, page_number)
-                if ocr_confidence and ocr_confidence > 0.6:
-                    text = ocr_text
+                ocr_images = self._ocr_page(file_path, page_number, extract_text=True)
+                images.extend(ocr_images)
+
+                if ocr_images:
+                    # Just take the first OCR result (page-level image)
+                    ocr_image = ocr_images[0]
+                    ocr_confidence = ocr_image.ocr_confidence
+                    ocr_text = ocr_image.ocr_text
+
+                    if ocr_text.split() and ocr_confidence and ocr_confidence > 0.6:
+                        text = ocr_text
+                    else:
+                        logger.debug(
+                            f"Ocr Extraction confidence rate for page {page_number} is {ocr_confidence} (considered low). "
+                            f"Text Preview: {ocr_text}"
+                        )
+
             except Exception as e:
                 logger.warning(f"OCR failed for page {page_number}: {e}")
 
@@ -218,22 +279,49 @@ class DocumentProcessor:
             if self.table_method == TableExtractionMethod.CAMELOT and self.camelot_available and file_path:
                 tables = self._extract_tables_camelot(file_path, page_number)
             else:
-                tables = self._extract_tables_from_page(page, page_number)
+                with pdfplumber.open(file_path) as pdf:
+                    tables = self._extract_tables_pdfplumber(page, page_number)
 
         # Check for images (simplified - just checks if page has images)
-        has_images = len(page.images) > 0 if hasattr(page, 'images') else False
+        # has_images = len(page.images) > 0 if hasattr(page, 'images') else False
 
         return PageContent(
             page_number=page_number,
             text=text,
+            images=images,
             tables=tables,
             has_images=has_images,
             is_scanned=is_scanned,  # NEW
             ocr_confidence=ocr_confidence  # NEW
         )
 
+    def _extract_images(self, page: fitz.Page, page_number: int, file_path: Path) -> List[ImageData]:
+        """
+        Extract embedded images from a page (not OCR).
+        """
+        image_list = []
+        for idx, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            pix = fitz.Pixmap(page.parent, xref)
+            image_path = file_path.parent / f"{file_path.stem}_page{page_number}_img{idx}.png"
+            pix.save(image_path)
 
-    def _extract_tables_from_page(
+            image_data = ImageData(
+                page_number=page_number,
+                image_index=idx,
+                file_path=str(image_path),
+                bbox=None,  # could be filled with img[1:5] if you want coordinates
+                detected_by="pymupdf",
+                extraction_method="embedded",
+                ocr_text=None,
+                ocr_confidence=None,
+                is_scanned=False,
+                is_inline=True
+            )
+            image_list.append(image_data)
+        return image_list
+
+    def _extract_tables_pdfplumber(
             self,
             page: pdfplumber.page.Page,
             page_number: int
@@ -344,40 +432,80 @@ class DocumentProcessor:
 
         return tables
 
-    def _ocr_page(self, file_path: Path, page_num: int) -> tuple[str, float]:
-        """NEW: OCR a single page."""
+    def _ocr_page(
+            self,
+            file_path: Path,
+            page_num: int,
+        extract_text: bool = False
+    ) -> List[ImageData]:
+        """
+        OCR a single page or just dump image metadata.
+        Args:
+            file_path: Path to PDF
+            page_num: 1-indexed page number
+            extract_text: If True, run OCR and fill text/confidence.
+                          If False, skip OCR and only save image metadata.
+        Returns:
+            List of ImageData records
+        """
+
         try:
-            # Convert PDF page to image
+            # Convert PDF page to image(s)
             images = self.convert_from_path(
                 file_path,
                 first_page=page_num,
                 last_page=page_num,
-                dpi=300
+                dpi=300 if extract_text else 150  # lower DPI if skipping OCR
             )
 
+            image_list = []
             if not images:
-                return "", 0.0
+                return []
 
-            image = images[0]
+            for idx, image in enumerate(images):
+                # Save image to disk for later reference
+                image_path = file_path.parent / f"{file_path.stem}_page{page_num}_{idx}.png"
+                image.save(image_path)
 
-            # OCR with confidence
-            ocr_data = self.pytesseract.image_to_data(
-                image,
-                output_type=self.pytesseract.Output.DICT
-            )
+                ocr_text = None
+                avg_confidence = None
 
-            text = self.pytesseract.image_to_string(image)
+                if extract_text:
+                    # Run OCR
+                    ocr_data = self.pytesseract.image_to_data(
+                        image,
+                        output_type=self.pytesseract.Output.DICT
+                    )
+                    ocr_text = self.pytesseract.image_to_string(image)
+                    confidences = [int(c) for c in ocr_data['conf'] if c != '-1']
+                    avg_confidence = (
+                        sum(confidences) / len(confidences) / 100.0 if confidences else 0.0
+                    )
+                    logger.debug(f"OCR page {page_num}: confidence={avg_confidence:.2f}")
 
-            # Calculate average confidence
-            confidences = [int(c) for c in ocr_data['conf'] if c != '-1']
-            avg_confidence = sum(confidences) / len(confidences) / 100.0 if confidences else 0.0
+                # Build ImageData record
+                image_data = ImageData(
+                    page_number=page_num,
+                    image_index=idx,
+                    file_path=str(image_path),
+                    bbox=None,
+                    detected_by="pytesseract" if extract_text else "image_dump",
+                    extraction_method="ocr" if extract_text else "image_only",
+                    ocr_text=ocr_text,
+                    ocr_confidence=avg_confidence,
+                    is_scanned=True
+                )
+                image_list.append(image_data)
+                logger.debug(
+                    f"OCR page {page_num}: confidence={avg_confidence:.2f}"
+                    if extract_text else f"Extract image metadata for page {page_num}"
+                )
 
-            logger.debug(f"OCR page {page_num}: confidence={avg_confidence:.2f}")
-            return text, avg_confidence
+            return image_list
 
         except Exception as e:
             logger.error(f"OCR failed for page {page_num}: {e}")
-            return "", 0.0
+            return []
 
     def extract_text_only(self, file_path: Path) -> str:
         """

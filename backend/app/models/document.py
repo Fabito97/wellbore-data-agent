@@ -47,6 +47,32 @@ class TableExtractionMethod(str, Enum):
     CAMELOT = "camelot"
 
 # ==================== Core Document Models ====================
+class ImageData(BaseModel):
+    """
+    Represents a single image extracted from a PDF page.
+    """
+
+    page_number: int = Field(..., description="PDF page where image was found")
+    image_index: int = Field(..., description="Index of image on the page (0-based)")
+
+    # Storage
+    file_path: Optional[str] = Field(None, description="Path to stored image file (e.g., PNG/JPEG)")
+    bbox: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Bounding box {x0, y0, x1, y1} in PDF coordinates"
+    )
+
+    # Optional metadata
+    detected_by: Optional[str] = Field(None, description="Library/tool used, e.g., pdfplumber, fitz")
+    extraction_method: Optional[str] = Field(None, description="Method used, e.g., raster, vector, embedded")
+    ocr_text: Optional[str] = Field(None, description="Text extracted via OCR, if available")
+    ocr_confidence: Optional[float] = Field(None, description="Confidence score of OCR extraction")
+
+    # Flags
+    is_scanned: bool = Field(False, description="Whether image looks like a scanned page")
+    is_inline: bool = Field(False, description="Whether image is inline (diagram/figure) vs full-page scan")
+
+
 class TableData(BaseModel):
     """
     Represents a single table extracted from a PDF - Need different handling than plain text
@@ -56,8 +82,9 @@ class TableData(BaseModel):
     headers: List[str] = Field(default_factory=list, description= "Column headers")
     rows: List[List[str]] = Field(..., description= "Table data as list of rows")
     bbox: Optional[Dict[str, float]] = Field(default=None, description= "Bounding box {x0, y0, x1, y1}")
+    raw_text: Optional[str] = Field(default=None, description= "Raw text extracted from PDF")
 
-    # NEW optional fields (won't break existing code)
+    # optional fields (won't break existing code)
     extraction_method: Optional[TableExtractionMethod] = None
     confidence: Optional[float] = None
 
@@ -67,9 +94,13 @@ class TableData(BaseModel):
         return len(self.rows)
 
     @property
-    def column_count(self):
-        """Number of Columns"""
-        return len(self.headers) if self.headers else (len(self.rows[0]) if self.rows else 0)
+    def column_count(self) -> int:
+        """Number of columns."""
+        if self.headers:
+            return len(self.headers)
+        elif self.rows and len(self.rows[0]) > 0:
+            return len(self.rows[0])
+        return 0
 
 
     def to_markdown(self):
@@ -81,14 +112,29 @@ class TableData(BaseModel):
 
         lines = []
 
+        # Add seperator lines
         if self.headers:
             lines.append("| " + " | ".join(self.headers) + " |")
             lines.append("| " + " | ".join(["----"] * len(self.headers)) + " |")
+        else:
+            # still add seperator lines for consistency
+            lines.append("| " + " | ".join(["----"] * len(self.rows[0])) + " |")
 
         for row in self.rows:
             lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
 
         return "\n".join(lines)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "page_number": self.page_number,
+            "table_index": self.table_index,
+            "headers": self.headers,
+            "rows": self.rows,
+            "bbox": self.bbox,
+            "extraction_method": str(self.extraction_method) if self.extraction_method else None,
+            "confidence": self.confidence,
+        }
 
 
 class PageContent(BaseModel):
@@ -100,8 +146,9 @@ class PageContent(BaseModel):
     text: str = Field(..., description="Raw text extracted from page")
     tables: List['TableData'] = Field(default_factory=list, description="Tables extracted from page")
     has_images: bool = Field(False, description="Whether page contains images")
+    images: Optional[List[ImageData]] = Field(default_factory=list, description="Metadata for images on page")
 
-    # NEW optional fields
+    # optional fields
     is_scanned: bool = False
     ocr_confidence: Optional[float] = None
 
@@ -128,6 +175,10 @@ class PageContent(BaseModel):
         """Number of tables on this page."""
         return len(self.tables)
 
+    @property
+    def image_count(self) -> int:
+        return len(self.images)
+
 
 class Well(BaseModel):
     """
@@ -138,11 +189,6 @@ class Well(BaseModel):
     document_count: int = Field(0, description="Count of documents")
     uploaded_at: datetime = Field(..., description="Date and time of uploaded") # for tracking the upload date for filtering
 
-
-from typing import List, Optional, Dict, Any
-from pathlib import Path
-from datetime import datetime
-from pydantic import BaseModel, Field
 
 class DocumentContent(BaseModel):
     """
@@ -188,7 +234,7 @@ class DocumentContent(BaseModel):
     # --- Computed properties ---
     @property
     def full_text(self) -> str:
-        return self.full_text or "\n\n".join(page.text for page in self.pages)
+        return "\n\n".join(page.text for page in self.pages)
 
     @property
     def total_word_count(self) -> int:
@@ -203,12 +249,27 @@ class DocumentContent(BaseModel):
         return sum(page.table_count for page in self.pages)
 
     @property
+    def image_count(self) -> int:
+        return sum(page.image_count for page in self.pages)
+
+    @property
     def all_tables(self) -> List[TableData]:
         """Get all tables from all pages."""
         tables: List [TableData] = []
         for page in self.pages:
             tables.extend(page.tables)
         return tables
+
+    @property
+    def all_images(self) -> List[ImageData]:
+        images = []
+        for page in self.pages:
+            images.extend(page.images)
+        return images
+
+    @property
+    def image_pages(self) -> List[int]:
+        return [page.page_number for page in self.pages if page.has_images]
 
     @property
     def summary(self):
@@ -221,6 +282,7 @@ class DocumentContent(BaseModel):
             "words": self.total_word_count,
             "tables": self.table_count,
             "chunks": self.chunk_count,
+            "image_pages": self.image_pages,
             "status": self.status,
             "well_name": self.well_name,
             "document_type": self.document_type,
