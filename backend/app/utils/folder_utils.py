@@ -25,6 +25,7 @@ DOCUMENT_TYPE_FOLDERS = {
     "technical logs": "TECHNICAL_LOGS",
     "technical log": "TECHNICAL_LOGS",
     "well report": "WELL_REPORT",  # ← TARGET: Only process these!
+    "well reports": "WELL_REPORT",  # ← TARGET: Only process these!
     "well test": "WELL_TEST",
 }
 
@@ -215,19 +216,3 @@ def scan_folder_structure(well_root: Path) -> Dict:
     )
 
     return structure
-
-
-def list_all_wells(root: Path) -> List[str]:
-    """
-    List all well names found in a directory.
-
-    Useful for batch processing multiple wells.
-    """
-    wells = []
-
-    for item in root.iterdir():
-        if item.is_dir():
-            well_name = extract_well_name(item.name)
-            wells.append(well_name)
-
-    return sorted(set(wells))  # Unique, sorted
