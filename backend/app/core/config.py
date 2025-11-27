@@ -61,7 +61,7 @@ class Settings(BaseSettings):
 
     # ==================== File Storage ====================
     # Path structure - can be customized via .env
-    DATA_DIR: Path = Path("../data")
+    DATA_DIR: Path = Path("data")
 
     @property
     def UPLOAD_DIR(self) -> Path:

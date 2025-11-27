@@ -280,7 +280,7 @@ class DocumentProcessor:
                 tables = self._extract_tables_camelot(file_path, page_number)
             else:
                 with pdfplumber.open(file_path) as pdf:
-                    tables = self._extract_tables_pdfplumber(page, page_number)
+                    tables = self._extract_tables_pdfplumber(pdf.pages[page_number+1], page_number)
 
         # Check for images (simplified - just checks if page has images)
         # has_images = len(page.images) > 0 if hasattr(page, 'images') else False
@@ -303,14 +303,14 @@ class DocumentProcessor:
         for idx, img in enumerate(page.get_images(full=True)):
             xref = img[0]
             pix = fitz.Pixmap(page.parent, xref)
-            image_path = file_path.parent / f"{file_path.stem}_page{page_number}_img{idx}.png"
+            image_path = file_path.parent / f"{file_path.stem}_page-{page_number}_img{idx+1}.png"
             pix.save(image_path)
 
             image_data = ImageData(
                 page_number=page_number,
-                image_index=idx,
+                image_index=idx+1,
                 file_path=str(image_path),
-                bbox=None,  # could be filled with img[1:5] if you want coordinates
+                bbox=img[1:5],  # could be filled with img[1:5] if you want coordinates
                 detected_by="pymupdf",
                 extraction_method="embedded",
                 ocr_text=None,

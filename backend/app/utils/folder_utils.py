@@ -7,6 +7,11 @@ Handles:
 - Document type detection
 - Well report filtering (ONLY well reports processed)
 """
+import shutil
+import tempfile
+from typing import Tuple, Union
+
+from fastapi import UploadFile
 from pathlib import Path
 from typing import Dict, List, Optional
 import re
@@ -27,6 +32,91 @@ DOCUMENT_TYPE_FOLDERS = {
     "well report": "WELL_REPORT",  # ← TARGET: Only process these!
     "well test": "WELL_TEST",
 }
+
+
+def extract_zip_to_temp(source: Union[UploadFile, Path]) -> Tuple[Path, Path]:
+    """
+    Save a ZIP file (from UploadFile or Path) to a temporary location and extract its contents.
+
+    Args:
+        source (Union[UploadFile, Path]): Either:
+            - FastAPI UploadFile (API context)
+            - Path to a ZIP file on disk (module/CLI context)
+
+    Returns:
+        Tuple[Path, Path]:
+            - temp_zip_path: Path to the temporary ZIP file saved on disk
+            - extract_dir: Path to the temporary directory where the ZIP was extracted
+
+    Notes:
+        - Caller is responsible for cleaning up both temp_zip_path and extract_dir.
+        - This function only prepares the folder; ingestion happens separately.
+    """
+    temp_zip_path = None
+    extract_dir = None
+
+    try:
+        # Case 1: UploadFile from API
+        if isinstance(source, UploadFile):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
+                shutil.copyfileobj(source.file, temp_zip)
+                temp_zip_path = Path(temp_zip.name)
+            logger.info(f"ZIP saved to temp: {temp_zip_path}")
+
+        # Case 2: Path from module/CLI
+        elif isinstance(source, Path):
+            if not source.exists():
+                raise FileNotFoundError(f"ZIP file not found: {source}")
+            temp_zip_path = Path(tempfile.mktemp(suffix=".zip"))
+            shutil.copy(source, temp_zip_path)
+            logger.info(f"ZIP copied to temp: {temp_zip_path}")
+
+        else:
+            raise TypeError("source must be UploadFile or Path")
+
+        # Create a temporary directory for extraction
+        extract_dir = Path(tempfile.mkdtemp())
+
+        # Extract ZIP contents into the temp directory
+        shutil.unpack_archive(str(temp_zip_path), extract_dir)
+        logger.info(f"ZIP extracted to: {extract_dir}")
+
+        return temp_zip_path, extract_dir
+
+    except Exception as e:
+        logger.error(f"Failed to extract ZIP: {e}", exc_info=True)
+        # Clean up partial files if something goes wrong
+        if temp_zip_path and temp_zip_path.exists():
+            temp_zip_path.unlink(missing_ok=True)
+        if extract_dir and extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
+        raise
+
+def cleanup_temp_paths(temp_zip_path: Optional[Path], extract_dir: Optional[Path]) -> None:
+    """
+    Clean up temporary ZIP file and extraction directory.
+
+    Args:
+        temp_zip_path (Optional[Path]): Path to the temporary ZIP file.
+        extract_dir (Optional[Path]): Path to the temporary extraction directory.
+
+    Notes:
+        - Safe to call even if paths are None or already deleted.
+        - Logs cleanup actions and warnings if deletion fails.
+    """
+    if temp_zip_path and temp_zip_path.exists():
+        try:
+            temp_zip_path.unlink()
+            logger.debug(f"Deleted temp ZIP: {temp_zip_path}")
+        except Exception as e:
+            logger.warning(f"Failed to delete temp ZIP {temp_zip_path}: {e}")
+
+    if extract_dir and extract_dir.exists():
+        try:
+            shutil.rmtree(extract_dir)
+            logger.debug(f"Deleted temp extraction folder: {extract_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to delete temp extraction folder {extract_dir}: {e}")
 
 
 def normalize_zip_structure(root: Path) -> Path:
