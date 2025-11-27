@@ -6,6 +6,7 @@ All operations are synchronous REST endpoints.
 """
 from pydantic import BaseModel
 
+from app.utils.folder_utils import extract_zip_to_temp, cleanup_temp_paths
 from app.utils.logger import get_logger
 from pathlib import Path
 import shutil
@@ -42,23 +43,11 @@ async def upload_document_zip(
             detail="Only ZIP files are supported"
         )
 
-    temp_zip_path = None
-    extract_dir = None
+    temp_zip_path , extract_dir = None, None
 
     try:
-        # Save ZIP to temp
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-            shutil.copyfileobj(file.file, temp_zip)
-            temp_zip_path = Path(temp_zip.name)
-
-        logger.info(f"ZIP saved to temp: {temp_zip_path}")
-
-        # Create temp extraction directory
-        extract_dir = Path(tempfile.mkdtemp())
-
-        # Extract ZIP
-        shutil.unpack_archive(temp_zip_path, extract_dir)
-        logger.info(f"ZIP extracted to: {extract_dir}")
+        # Extract ZIP to temp
+        temp_zip_path, extract_dir = extract_zip_to_temp(source=file)
 
         # Process folder instead of single file
         result = service.ingest_folder(
@@ -85,18 +74,7 @@ async def upload_document_zip(
     finally:
         # Clean up temp files/folders
         if temp_zip_path and temp_zip_path.exists():
-            try:
-                temp_zip_path.unlink()
-                logger.debug(f"Deleted temp ZIP: {temp_zip_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete temp ZIP: {e}")
-
-        if extract_dir and extract_dir.exists():
-            try:
-                shutil.rmtree(extract_dir)
-                logger.debug(f"Deleted temp extraction folder: {extract_dir}")
-            except Exception as e:
-                logger.warning(f"Failed to delete temp extraction folder: {e}")
+            cleanup_temp_paths(temp_zip_path, extract_dir)
 
 
 @router.post("/upload", response_model=DocumentUploadApiResponse)

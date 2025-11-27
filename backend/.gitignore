@@ -11,13 +11,13 @@ env/
 ENV/
 technical_logs/
 # Data
-app/data/uploads/*
-!app/data/uploads/.gitkeep
-app/data/vector_db/*
-!app/data/vector_db/.gitkeep
-app/data/processed/*
-!app/data/processed/.gitkeep
-
+data/uploads/*
+!data/uploads/.gitkeep
+data/vector_db/*
+!data/vector_db/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/wellbore_agent.db
 # Environment
 .env
 app/validation/

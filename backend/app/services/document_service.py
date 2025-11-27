@@ -57,11 +57,21 @@ class DocumentService:
             logger.debug(f"Found existing well: {well_name}")
             return well
 
-        # Create new
+            # Base ID from timestamp
+        now = datetime.utcnow()
+        timestamp_str = now.strftime("%Y%m%d%H%M%S")
+        base_id = f"{well_name}_{timestamp_str}"
+
+        # Check for existing wells with same base_id
+        stmt = select(Well).where(Well.id.like(f"{base_id}_%"))
+        existing = self.db.execute(stmt).scalars().all()
+        version = len(existing) + 1
+
         new_well = Well(
-            id=f"well-{uuid.uuid4().hex[:8]}",
+            id=f"{base_id}_{version:03d}",  # e.g. Well-1_20251127013945_001
             name=well_name,
-            document_count=0
+            document_count=0,
+            created_at=now
         )
 
         self.db.add(new_well)
@@ -287,12 +297,13 @@ class DocumentService:
         start_time = time.time()
         doc_id = document_id or str(uuid.uuid4())
 
-        logger.info(f"Ingesting: {original_filename} ({doc_id})")
+        logger.info(f"Ingesting {well_name}: {original_filename} ({doc_id})")
 
+        permanent_path = ""
         try:
             # Save file
             permanent_path = self._save_file_permanently(
-                file_path, doc_id, original_filename
+                file_path, doc_id, original_filename, well_id
             )
 
             # Process PDF
@@ -315,6 +326,7 @@ class DocumentService:
             added = self.vector_store.add_chunks(chunks_with_embeddings)
             if added != len(chunks):
                 logger.warning(f"Added {added}/{len(chunks)} chunks")
+
 
             # Store metadata in DB
             db_document = Document(
@@ -363,6 +375,13 @@ class DocumentService:
         except Exception as e:
             logger.error(f"Ingestion failed: {e}", exc_info=True)
             self.db.rollback()
+
+            try:
+                if permanent_path.exists() and permanent_path.is_file():
+                    permanent_path.unlink()
+                    logger.debug(f"Deleted failed file: {permanent_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Cleanup failed: {cleanup_error}")
 
             return DocumentProcessingError(
                 document_id=doc_id,
@@ -482,12 +501,29 @@ class DocumentService:
         }
 
     def _save_file_permanently(
-        self, temp_path: Path, document_id: str, original_filename: str
+            self,
+            temp_path: Path,
+            document_id: str,
+            original_filename: str,
+            well_id: Optional[str] = None,
+            doc_type: Optional[str] = None,
+            is_image: bool = False
     ) -> Path:
         """Save file to permanent storage."""
+        well_folder = well_id or "unknown_well"
+
+        subfolder = "images" if is_image else "docs"
+        # if doc_type:
+        #     lower_doc_type = doc_type.lower()
+        #     subfolder = Path(lower_doc_type) / "images" if is_image else Path(lower_doc_type)
+
+        folder = settings.UPLOAD_DIR / well_folder / subfolder
+        folder.mkdir(parents=True, exist_ok=True)
+
         extension = Path(original_filename).suffix
         permanent_filename = f"{document_id}{extension}"
-        permanent_path = settings.UPLOAD_DIR / permanent_filename
+        permanent_path = folder / permanent_filename
+
         shutil.copy(str(temp_path), str(permanent_path))
         logger.debug(f"Saved: {permanent_path}")
         return permanent_path
