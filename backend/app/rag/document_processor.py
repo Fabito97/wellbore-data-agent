@@ -195,7 +195,9 @@ class DocumentProcessor:
 def process_pdf(
         file_path: Path,
         well_id: str,
+        well_name: Optional[str],
         document_id: Optional[str] = None,
+        document_type: Optional[str] = None,
         extract_tables: bool = True
 ) -> DocumentContent:
     """
@@ -211,7 +213,13 @@ def process_pdf(
         DocumentContent
     """
     processor = DocumentProcessor(extract_tables=extract_tables)
-    return processor.process_document(file_path=file_path, well_id=well_id, document_id=document_id)
+    return processor.process_document(
+        file_path=file_path,
+        well_id=well_id,
+        well_name=well_name,
+        document_id=document_id,
+        document_type=document_type
+    )
 
 
 def get_page_count(file_path: Path) -> int:
