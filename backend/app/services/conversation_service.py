@@ -3,6 +3,7 @@ Conversation Service - Manages conversation history in the database.
 """
 from datetime import datetime
 
+from app.services.llm_service import get_llm_service
 from app.utils.logger import get_logger
 import uuid
 from typing import List, Optional
@@ -22,6 +23,8 @@ class ConversationService:
     """
     def __init__(self, db_session: Session):
         self.db = db_session
+        self.llm = get_llm_service().llm
+
         logger.debug("ConversationService initialized with database session.")
 
     def get_or_create_conversation(self, conversation_id: Optional[str] = None) -> Conversation:

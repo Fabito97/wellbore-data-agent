@@ -47,7 +47,7 @@ async def upload_document_zip(
 
     try:
         # Extract ZIP to temp
-        temp_zip_path, extract_dir = extract_zip_to_temp(source=file)
+        temp_zip_path, extract_dir = extract_zip_to_temp(source_file=file)
 
         # Process folder instead of single file
         result = service.ingest_folder(
@@ -215,7 +215,7 @@ async def get_document_status(
 
 # ==================== Get Document Details ====================
 
-@router.delete("/store/clear-store")
+@router.delete("/store/clear")
 async def clear_store(
         service: DocumentService = Depends(get_document_service)
 ):
@@ -277,6 +277,25 @@ async def delete_document(
         "message": f"Document {document_id} deleted successfully"
     }
 
+@router.delete("/state/wipe")
+async def clear_all_documents(
+        service: DocumentService = Depends(get_document_service)
+):
+    """
+    Clears all documents including upload and vector storage
+    """
+    success = service.reset_system()
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Failed to clear all documents"
+        )
+
+    return {
+        "message": f"Successfully wiped all documents from the system"
+    }
+
 
 # ==================== Get Service Stats ====================
 
@@ -304,19 +323,6 @@ class WellCreateRequest(BaseModel):
     name: str
 
 
-@router.get("/wells")
-async def list_wells(
-    service: DocumentService = Depends(get_document_service)
-):
-    """List all wells (summary)."""
-    try:
-        wells = service.list_wells()
-        return {"total": len(wells), "wells": wells}
-    except Exception as e:
-        logger.error(f"Failed to list wells: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list wells")
-
-
 @router.get("/wells/with-documents")
 async def list_wells_with_documents(
     service: DocumentService = Depends(get_document_service)
@@ -328,25 +334,6 @@ async def list_wells_with_documents(
     except Exception as e:
         logger.error(f"Failed to list wells with documents: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list wells")
-
-
-@router.post("/wells", status_code=status.HTTP_201_CREATED)
-async def create_or_get_well(
-    payload: WellCreateRequest,
-    service: DocumentService = Depends(get_document_service)
-):
-    """Create a well or return existing one by normalized name."""
-    try:
-        well = service.get_or_create_well(payload.name)
-        return {
-            "id": well.id,
-            "name": well.name,
-            "document_count": well.document_count,
-            "created_at": well.created_at.isoformat() if getattr(well, "created_at", None) else None
-        }
-    except Exception as e:
-        logger.error(f"Failed to create/get well: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/wells/{well_id}")
@@ -370,24 +357,6 @@ async def get_well_by_id(
         logger.error(f"Failed to get well by id: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-
-@router.get("/wells/by-name/{well_name}")
-async def get_well_by_name(
-    well_name: str,
-    service: DocumentService = Depends(get_document_service)
-):
-    """Get well by name (normalized)"""
-    try:
-        well = service.get_well(well_name=well_name)
-        if not well:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Well {well_name} not found")
-        well["created_at"] = well["created_at"].isoformat() if well.get("created_at") else None
-        return well
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to get well by name: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/wells/{well_id}/documents")

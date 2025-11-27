@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False},
-    echo=settings.DEBUG
+    echo=False
+    # echo=settings.DEBUG
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -63,7 +64,7 @@ class Document(Base):
     # Identity
     id = Column(String, primary_key=True, index=True)  # UUID
     filename = Column(String, nullable=False)
-    file_path = Column(String, nullable=False)
+    file_path = Column(String, nullable=False) # stored file_path
 
     # Well association
     well_id = Column(String, ForeignKey("wells.id"), nullable=True, index=True)
@@ -132,6 +133,23 @@ def create_db_and_tables():
     except Exception as e:
         logger.error(f"❌ Error creating database tables: {e}", exc_info=True)
         raise
+
+def reset_database():
+    """
+    Drop all tables and recreate them using SQLAlchemy metadata.
+    """
+    try:
+        # Drop all tables
+        Base.metadata.drop_all(bind=engine)
+        logging.info("Database tables dropped")
+
+        # Recreate all tables
+        Base.metadata.create_all(bind=engine)
+        logging.info("Database tables recreated")
+    except Exception as e:
+        logging.error(f"Failed to reset database: {e}")
+        raise
+
 
 
 # ==================== FastAPI Dependency ====================

@@ -45,134 +45,6 @@ class DocumentService:
         self.vector_store = get_vector_store()
         logger.info("DocumentService initialized with database")
 
-    # ==================== Well Management ====================
-
-    def get_or_create_well(self, well_name: str) -> Well:
-        """Get existing well or create new one."""
-        # Check if exists
-        stmt = select(Well).where(Well.name == well_name)
-        well = self.db.execute(stmt).scalar_one_or_none()
-
-        if well:
-            logger.debug(f"Found existing well: {well_name}")
-            return well
-
-            # Base ID from timestamp
-        now = datetime.utcnow()
-        timestamp_str = now.strftime("%Y%m%d%H%M%S")
-        base_id = f"{well_name}_{timestamp_str}"
-
-        # Check for existing wells with same base_id
-        stmt = select(Well).where(Well.id.like(f"{base_id}_%"))
-        existing = self.db.execute(stmt).scalars().all()
-        version = len(existing) + 1
-
-        new_well = Well(
-            id=f"{base_id}_{version:03d}",  # e.g. Well-1_20251127013945_001
-
-            name=well_name,
-            document_count=0,
-            created_at=now
-        )
-
-        self.db.add(new_well)
-        self.db.commit()
-        self.db.refresh(new_well)
-
-        logger.info(f"✅ Created well: {well_name} ({new_well.id})")
-        return new_well
-
-    def list_wells(self) -> List[Dict[str, Any]]:
-        """List all wells."""
-        stmt = select(Well).order_by(Well.created_at.desc())
-        wells = self.db.execute(stmt).scalars().all()
-
-        return [
-            {
-                "id": w.id,
-                "name": w.name,
-                "document_count": w.document_count,
-                "created_at": w.created_at.isoformat()
-            }
-            for w in wells
-        ]
-
-    def list_wells_with_documents(self) -> List[Dict[str, Any]]:
-        stmt = select(Well).order_by(Well.created_at.desc())
-        wells = self.db.execute(stmt).scalars().all()
-
-        return [
-            {
-                "id": w.id,
-                "name": w.name,
-                "document_count": len(w.documents),
-                "documents": [
-                    {
-                        "id": d.id,
-                        "filename": d.filename,
-                        "document_type": d.document_type,
-                        "uploaded_at": d.uploaded_at.isoformat()
-                    }
-                    for d in w.documents
-                ],
-                "created_at": w.created_at.isoformat()
-            }
-            for w in wells
-        ]
-
-    def list_documents_by_well(self, well_id: str) -> List[Dict[str, Any]]:
-        stmt = select(Document).where(Document.well_id == well_id).order_by(Document.uploaded_at.desc())
-        docs = self.db.execute(stmt).scalars().all()
-
-        return [
-            {
-                "document_id": d.id,
-                "filename": d.filename,
-                "document_type": d.document_type,
-                "uploaded_at": d.uploaded_at.isoformat()
-            }
-            for d in docs
-        ]
-
-    def get_well(
-            self,
-            well_id: int | None = None,
-            well_name: str | None = None
-    ):
-        # Validate
-        if (well_id and well_name) or (not well_id and not well_name):
-            raise ValueError("Provide exactly one of well_id or well_name.")
-
-        stmt = None
-
-        if well_id:
-            stmt = select(Well).where(Well.id == well_id)
-        else:
-            normalized_name = normalize_well_name(well_name)
-            stmt = select(Well).where(Well.name == normalized_name)
-
-        well = self.db.execute(stmt).scalar_one_or_none()
-        if not well:
-            return None  # or raise NotFound
-
-        # Load documents for the well
-        docs_stmt = select(Document).where(Document.well_id == well.id)
-        docs = self.db.execute(docs_stmt).scalars().all()
-
-        return {
-            "id": well.id,
-            "name": well.name,
-            "created_at": well.created_at,
-            "document_count": len(docs),
-            "documents": [
-                {
-                    "document_id": d.id,
-                    "filename": d.filename,
-                    "document_type": d.document_type
-                }
-                for d in docs
-            ]
-        }
 
     # ==================== Folder Ingestion ====================
 
@@ -287,10 +159,10 @@ class DocumentService:
         self,
         file_path: Path,
         original_filename: str,
+        well_id: str,
+        well_name: str,
+        document_type: str,
         document_id: Optional[str] = None,
-        well_id: Optional[str] = None,
-        well_name: Optional[str] = None,
-        document_type: Optional[str] = None,
         original_folder_path: Optional[str] = None,
         file_format: Optional[str] = None,
     ) -> Union[DocumentUploadResponse, DocumentProcessingError]:
@@ -304,11 +176,17 @@ class DocumentService:
         try:
             # Save file
             permanent_path = self._save_file_permanently(
-                file_path, doc_id, original_filename, well_id
+                temp_path=file_path,
+                document_id=doc_id,
+                original_filename=original_filename,
+                well_id=well_id,
+                doc_type=document_type
             )
 
             # Process PDF
-            document_content = process_pdf(permanent_path, document_id=doc_id)
+            document_content = process_pdf(file_path=permanent_path, document_id=doc_id, well_id=well_id)
+
+            # Attach properties
             document_content.filename = original_filename
             document_content.well_id = well_id
             document_content.well_name = well_name
@@ -391,7 +269,135 @@ class DocumentService:
                 details="See logs"
             )
 
-    # ==================== Query Methods ====================
+    # ==================== Well Management ====================
+
+    def get_or_create_well(self, well_name: str) -> Well:
+        """Get existing well or create new one."""
+        # Check if exists
+        stmt = select(Well).where(Well.name == well_name)
+        well = self.db.execute(stmt).scalar_one_or_none()
+
+        if well:
+            logger.debug(f"Found existing well: {well_name}")
+            return well
+
+            # Base ID from timestamp
+        now = datetime.utcnow()
+        timestamp_str = now.strftime("%Y%m%d%H%M%S")
+        base_id = f"{well_name}_{timestamp_str}"
+
+        # Check for existing wells with same base_id
+        stmt = select(Well).where(Well.id.like(f"{base_id}_%"))
+        existing = self.db.execute(stmt).scalars().all()
+        version = len(existing) + 1
+
+        new_well = Well(
+            id=f"{base_id}_{version:03d}",  # e.g. Well-1_20251127013945_001
+            name=well_name,
+            document_count=0,
+            created_at=now
+        )
+
+        self.db.add(new_well)
+        self.db.commit()
+        self.db.refresh(new_well)
+
+        logger.info(f"✅ Created well: {well_name} ({new_well.id})")
+        return new_well
+
+    def list_wells(self) -> List[Dict[str, Any]]:
+        """List all wells."""
+        stmt = select(Well).order_by(Well.created_at.desc())
+        wells = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "id": w.id,
+                "name": w.name,
+                "document_count": w.document_count,
+                "created_at": w.created_at.isoformat()
+            }
+            for w in wells
+        ]
+
+    def list_wells_with_documents(self) -> List[Dict[str, Any]]:
+        stmt = select(Well).order_by(Well.created_at.desc())
+        wells = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "id": w.id,
+                "name": w.name,
+                "document_count": len(w.documents),
+                "documents": [
+                    {
+                        "id": d.id,
+                        "filename": d.filename,
+                        "document_type": d.document_type,
+                        "uploaded_at": d.uploaded_at.isoformat()
+                    }
+                    for d in w.documents
+                ],
+                "created_at": w.created_at.isoformat()
+            }
+            for w in wells
+        ]
+
+    def list_documents_by_well(self, well_id: str) -> List[Dict[str, Any]]:
+        stmt = select(Document).where(Document.well_id == well_id).order_by(Document.uploaded_at.desc())
+        docs = self.db.execute(stmt).scalars().all()
+
+        return [
+            {
+                "document_id": d.id,
+                "filename": d.filename,
+                "document_type": d.document_type,
+                "uploaded_at": d.uploaded_at.isoformat()
+            }
+            for d in docs
+        ]
+
+    def get_well(
+            self,
+            well_id: int | None = None,
+            well_name: str | None = None
+    ):
+        # Validate
+        if (well_id and well_name) or (not well_id and not well_name):
+            raise ValueError("Provide exactly one of well_id or well_name.")
+
+        stmt = None
+
+        if well_id:
+            stmt = select(Well).where(Well.id == well_id)
+        else:
+            normalized_name = normalize_well_name(well_name)
+            stmt = select(Well).where(Well.name == normalized_name)
+
+        well = self.db.execute(stmt).scalar_one_or_none()
+        if not well:
+            return None  # or raise NotFound
+
+        # Load documents for the well
+        docs_stmt = select(Document).where(Document.well_id == well.id)
+        docs = self.db.execute(docs_stmt).scalars().all()
+
+        return {
+            "id": well.id,
+            "name": well.name,
+            "created_at": well.created_at,
+            "document_count": len(docs),
+            "documents": [
+                {
+                    "document_id": d.id,
+                    "filename": d.filename,
+                    "document_type": d.document_type
+                }
+                for d in docs
+            ]
+        }
+
+    # ==================== Document Management ====================
 
     def get_document(self, document_id: str) -> Optional[Document]:
         """Get document by ID."""
@@ -504,9 +510,9 @@ class DocumentService:
     def _save_file_permanently(
             self,
             temp_path: Path,
+            well_id: str,
             document_id: str,
             original_filename: str,
-            well_id: Optional[str] = None,
             doc_type: Optional[str] = None,
             is_image: bool = False
     ) -> Path:
@@ -528,6 +534,44 @@ class DocumentService:
         shutil.copy(str(temp_path), str(permanent_path))
         logger.debug(f"Saved: {permanent_path}")
         return permanent_path
+
+
+    def reset_system(self):
+        """
+        Full reset: clear vector store, delete SQLite DB, remove all uploaded files on disk.
+        WARNING: This is destructive.
+        """
+        try:
+            # Clear vector store
+            self.vector_store.clear_store()
+            logger.info("Vector store cleared")
+
+            # Delete DB file (SQLite)
+            from app.core.database import reset_database
+            reset_database()
+
+            # Delete all uploads
+            upload_dir = Path(settings.UPLOAD_DIR)
+            if upload_dir.exists():
+                shutil.rmtree(upload_dir)
+                logger.info(f"Deleted upload directory: {upload_dir}")
+
+            # Delete all processed
+            processed_dir = Path(settings.UPLOAD_DIR)
+            if processed_dir.exists():
+                shutil.rmtree(processed_dir)
+                logger.info(f"Deleted processed directory: {processed_dir}")
+
+            # Recreate empty upload directory
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Upload directory recreated empty")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"System reset failed: {e}", exc_info=True)
+            return False
 
 
 # ==================== FastAPI Dependency ====================

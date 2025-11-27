@@ -22,7 +22,10 @@ class DocumentFormat(str, Enum):
     """Types of documents - NEW but optional."""
     PDF = "pdf"
     IMAGE = "image"
+    TEXT = "text"
+    CSV = "csv"
     EXCEL = "excel"
+    DOCX = "docx"
     OTHER = "other"
 
 

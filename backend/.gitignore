@@ -12,6 +12,7 @@ ENV/
 technical_logs/
 # Data
 data/uploads/*
+data/raw/*
 !data/uploads/.gitkeep
 data/vector_db/*
 !data/vector_db/.gitkeep

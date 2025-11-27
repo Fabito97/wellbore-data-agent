@@ -79,7 +79,6 @@ class DocumentRetriever:
         )
 
 
-
     def retrieve(
             self,
             query: str,

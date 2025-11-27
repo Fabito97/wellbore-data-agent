@@ -133,13 +133,11 @@ class VectorStoreManager:
         logger.info(f"Found {len(formatted)} results")
         return formatted
 
-    # -------------------- Document-Level Operations (NEW!) --------------------
+    # -------------------- Document-Level Operations --------------------
 
     def delete_by_document_id(self, document_id: str) -> int:
         """
         Delete all chunks for a specific document.
-
-        This was MISSING in your version!
         """
         logger.info(f"Deleting chunks for document: {document_id}")
 
