@@ -18,10 +18,12 @@ from typing import List, Optional
 import pdfplumber
 import fitz  # PyMuPDF
 
+from app.core.config import settings
 from app.models.document import (
     DocumentContent, PageContent, DocumentStatus,
-    TableExtractionMethod
+    TableExtractionMethod, ImageData
 )
+from app.utils.extractors.image_extractor import ImageExtractor
 from app.utils.extractors.table_extractor import TableExtractor
 from app.utils.extractors.ocr_extractor import OCRExtractor
 from app.utils.logger import get_logger
@@ -53,7 +55,6 @@ class PDFExtractor:
         self.extract_tables = extract_tables
         self.table_method = table_method
         self.enable_ocr = enable_ocr
-
 
         self.table_extractor = None
         if extract_tables:
@@ -95,7 +96,7 @@ class PDFExtractor:
 
         try:
             # Extract pages
-            pages = self._extract_all_pages(file_path)
+            pages = self._extract_all_pages(file_path, well_id)
 
             # Build document
             processing_time = time.time() - start_time
@@ -123,7 +124,7 @@ class PDFExtractor:
             logger.error(f"PDF extraction failed: {e}", exc_info=True)
             raise
 
-    def _extract_all_pages(self, file_path: Path) -> List[PageContent]:
+    def _extract_all_pages(self, file_path: Path, well_id: Optional[str] = None) -> List[PageContent]:
         """
         Extract content from all pages.
 
@@ -149,7 +150,8 @@ class PDFExtractor:
                     page_content = self._extract_page(
                         file_path,
                         page_num + 1,
-                        pymupdf_page=pymupdf_page
+                        pymupdf_page=pymupdf_page,
+                        well_id=well_id
                     )
                     pages.append(page_content)
 
@@ -199,7 +201,8 @@ class PDFExtractor:
             file_path: Path,
             page_number: int,
             pymupdf_page=None,
-            pdfplumber_page=None
+            pdfplumber_page=None,
+            well_id: Optional[str] = None
     ) -> PageContent:
         """
         Extract content from a single page.
@@ -222,11 +225,21 @@ class PDFExtractor:
         # Check if scanned
         word_count = len(text.split())
         has_text = word_count > 0
+        images: List[ImageData] = []
 
         # Check for images
         has_images = False
         if pymupdf_page:
             has_images = len(pymupdf_page.get_images(full=True)) > 0
+
+            if has_images:
+                images.extend(self._extract_images(
+                    pymupdf_page,
+                    page_number,
+                    file_path,
+                    well_id=well_id
+                ))
+
         elif pdfplumber_page:
             has_images = len(pdfplumber_page.images) > 0
 
@@ -259,10 +272,58 @@ class PDFExtractor:
             page_number=page_number,
             text=text,
             tables=tables,
+            images=images,
             has_images=has_images,
             is_scanned=is_scanned,
             ocr_confidence=ocr_confidence
         )
+
+
+    def _extract_images(
+            self,
+            page: fitz.Page,
+            page_number: int,
+            file_path: Path,
+            well_id: str = None
+    ) -> List[ImageData]:
+        """
+        Extract images from a page.
+
+        Args:
+            file_path: Path to PDF
+            page_number: Page number
+            pymupdf_page: PyMuPDF page object
+
+        Returns:
+            List of image metadata dicts
+        """
+        # Build path:
+        # <UPLOAD_DIR>/<well_id>/images/
+        folder = well_id or "unknown_well"
+        images_dir = settings.UPLOAD_DIR / folder / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        image_list = []
+        for idx, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            pix = fitz.Pixmap(page.parent, xref)
+            image_path = images_dir / f"{file_path.stem}_page{page_number}_img{idx}.png"
+            pix.save(image_path)
+
+            image_data = ImageData(
+                page_number=page_number,
+                image_index=idx,
+                file_path=str(image_path),
+                bbox=None,  # could be filled with img[1:5] if you want coordinates
+                detected_by="pymupdf",
+                extraction_method="embedded",
+                ocr_text=None,
+                ocr_confidence=None,
+                is_scanned=False,
+                is_inline=True
+            )
+            image_list.append(image_data)
+        return image_list
 
 
     def _extract_text(

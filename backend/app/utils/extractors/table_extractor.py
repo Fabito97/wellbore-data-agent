@@ -10,6 +10,7 @@ Single responsibility: Extract tables from PDF pages.
 from pathlib import Path
 from typing import List, Optional
 import pdfplumber
+import pdfplumber.page as pdf_page
 
 from app.models.document import TableData, TableExtractionMethod
 from app.utils.logger import get_logger
@@ -59,24 +60,26 @@ class TableExtractor:
         """
         if self.method == TableExtractionMethod.CAMELOT and self.camelot_available:
             return self._extract_with_camelot(file_path, page_number)
-        else:
-            return self._extract_with_pdfplumber(file_path, page_number, pdfplumber_page)
+
+        # ---- FIX: Ensure pdfplumber always has an open PDF ----
+        if pdfplumber_page is None:
+            with pdfplumber.open(file_path) as pdf:
+                page = pdf.pages[page_number - 1]
+                return self._extract_with_pdfplumber(page_number=page_number, page=page)
+
+        # If the caller already provided an open page
+        return self._extract_with_pdfplumber(page_number=page_number, file_path=file_path, page=pdfplumber_page)
 
     def _extract_with_pdfplumber(
             self,
-            file_path: Path,
             page_number: int,
-            page=None
+            file_path: Path = None,
+            page: pdf_page.Page = None,
     ) -> List[TableData]:
         """Extract tables using pdfplumber."""
         tables = []
 
         try:
-            # Open page if not provided
-            if page is None:
-                with pdfplumber.open(file_path) as pdf:
-                    page = pdf.pages[page_number - 1]
-
             raw_tables = page.extract_tables()
 
             if not raw_tables:

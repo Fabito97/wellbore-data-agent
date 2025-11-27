@@ -1,11 +1,11 @@
 """
 Batch ingestion runner for Wellbore AI Agent.
 
-This script scans the UPLOAD_DIR defined in app.core.config.Settings,
+This script scans the RAW_DIR defined in app.core.config.Settings,
 handles ZIP extraction or folder ingestion, and moves items into
 PROCESSED_DIR or FAILED_DIR after processing.
 """
-import logging
+from app.utils.logger import  get_logger
 import shutil
 
 from app.core.config import settings
@@ -13,8 +13,7 @@ from app.core.database import get_db  # your SQLAlchemy session factory
 from app.services.document_service import DocumentService
 from app.utils.folder_utils import extract_zip_to_temp, cleanup_temp_paths
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=settings.LOG_LEVEL, format=settings.LOG_FORMAT)
+logger = get_logger(__name__)
 
 
 def ingest_uploads():
@@ -29,7 +28,8 @@ def ingest_uploads():
 
     upload_dir = settings.RAW_DIR
     processed_dir = settings.PROCESSED_DIR
-    failed_dir = settings.DATA_DIR / "failed"  # optional extra folder
+    failed_dir = settings.DATA_DIR / "failed"  # optional extra folder for failed uploads
+    processed_dir.mkdir(parents=True, exist_ok=True)
     failed_dir.mkdir(parents=True, exist_ok=True)
 
     # Ensure upload dir exists
@@ -51,7 +51,7 @@ def ingest_uploads():
 
             # Case 1: ZIP file
             if item.suffix.lower() == ".zip":
-                temp_zip_path, extract_dir = extract_zip_to_temp(item)
+                temp_zip_path, extract_dir = extract_zip_to_temp(source=item)
                 try:
                     result = service.ingest_folder(folder_path=extract_dir, original_filename=item.name)
                     target_dir = processed_dir if not result.errors else failed_dir

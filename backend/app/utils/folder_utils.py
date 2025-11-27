@@ -11,7 +11,7 @@ import shutil
 import tempfile
 from typing import Tuple, Union
 
-from fastapi import UploadFile
+from fastapi import UploadFile, File
 from pathlib import Path
 from typing import Dict, List, Optional
 import re
@@ -35,13 +35,13 @@ DOCUMENT_TYPE_FOLDERS = {
 }
 
 
-def extract_zip_to_temp(source: Union[UploadFile, Path]) -> Tuple[Path, Path]:
+def extract_zip_to_temp(source: Optional[Path] = None, source_file: Optional[UploadFile] = None) -> Tuple[Path, Path]:
     """
     Save a ZIP file (from UploadFile or Path) to a temporary location and extract its contents.
 
     Args:
-        source (Union[UploadFile, Path]): Either:
-            - FastAPI UploadFile (API context)
+            - source Path: File path
+            - source_file: FastAPI UploadFile (API context)
             - Path to a ZIP file on disk (module/CLI context)
 
     Returns:
@@ -58,14 +58,14 @@ def extract_zip_to_temp(source: Union[UploadFile, Path]) -> Tuple[Path, Path]:
 
     try:
         # Case 1: UploadFile from API
-        if isinstance(source, UploadFile):
+        if source_file:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temp_zip:
-                shutil.copyfileobj(source.file, temp_zip)
+                shutil.copyfileobj(source_file.file, temp_zip)
                 temp_zip_path = Path(temp_zip.name)
             logger.info(f"ZIP saved to temp: {temp_zip_path}")
 
         # Case 2: Path from module/CLI
-        elif isinstance(source, Path):
+        elif source and isinstance(source, Path):
             if not source.exists():
                 raise FileNotFoundError(f"ZIP file not found: {source}")
             temp_zip_path = Path(tempfile.mktemp(suffix=".zip"))
