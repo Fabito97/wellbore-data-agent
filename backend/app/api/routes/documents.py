@@ -192,6 +192,32 @@ async def list_documents(
         )
 
 
+@router.get("/{document_id}/chunks")
+async def list_documents_with_chunks(
+        document_id: str,
+        service: DocumentService = Depends(get_document_service)
+):
+    """
+    List all documents in the system.
+
+    Returns:
+        List of document summaries
+    """
+    try:
+        documents = service.get_document_and_chunks(document_id)
+        return {
+            "total": len(documents),
+            "data": documents
+        }
+    except Exception as e:
+        logger.error(f"Failed to list documents: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve documents"
+        )
+
+
+
 # ==================== Get Document Status ====================
 
 @router.get("/{document_id}/status")
@@ -252,7 +278,10 @@ async def get_document(
         )
 
     # Return as dict (Pydantic model to JSON)
-    return document.model_dump()
+    return {
+        "message": "Document retrieved successfully",
+        "document": document
+    }
 
 
 # ==================== Delete Document ====================

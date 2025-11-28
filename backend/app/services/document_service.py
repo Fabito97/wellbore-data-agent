@@ -221,6 +221,7 @@ class DocumentService:
                 page_count=document_content.page_count,
                 word_count=document_content.total_word_count,
                 table_count=document_content.table_count,
+                image_count=document_content.image_count,
                 chunk_count=len(chunks),
                 processing_time_seconds=time.time() - start_time,
                 extraction_method=str(document_content.extraction_method.value),
@@ -403,6 +404,52 @@ class DocumentService:
         """Get document by ID."""
         return self.db.get(Document, document_id)
 
+
+    def get_document_and_chunks(self, document_id: str, max_count=15) -> Optional[Dict[str, Any]]:
+        """Retrieve a document and its vector chunks."""
+        logger.info(f"Fetching document: {document_id}")
+
+        # 1. Get SQL document metadata
+        document: Document = self.get_document(document_id)
+
+        if not document:
+            logger.warning(f"Document not found: {document_id}")
+            return None
+
+        # 2. Get all vector chunks for this document
+        chunks = self.vector_store.get_by_document_id_or_type(document_id=document_id)
+
+        # 3. Build response
+        return {
+            "id": document.id,
+            "filename": document.filename,
+            "file_path": document.file_path,
+            "document_type": document.document_type,
+            "file_format": document.file_format,
+            "original_folder_path": document.original_folder_path,
+
+            # Well metadata
+            "well_id": document.well_id,
+            "well_name": document.well_name,
+
+            # Processing info
+            "status": document.status,
+            "page_count": document.page_count,
+            "word_count": document.word_count,
+            "table_count": document.table_count,
+            "chunk_count": document.chunk_count,
+            "processing_time_seconds": document.processing_time_seconds,
+            "extraction_method": document.extraction_method,
+            "ocr_enabled": document.ocr_enabled,
+
+            # Timestamps
+            "uploaded_at": document.uploaded_at,
+            "processed_at": document.processed_at,
+
+            # Chunks from vector DB
+            "chunks": chunks[:max_count]
+        }
+
     def get_document_status(self, document_id: str) -> Optional[Dict[str, Any]]:
         """Return processing/status information for a document (JSON-serializable)."""
         doc = self.db.get(Document, document_id)
@@ -442,6 +489,7 @@ class DocumentService:
                 "well_id": d.well_id,
                 "file_format": d.file_format,
                 "table_count": d.table_count,
+                "image_count": d.image_count,
                 "document_type": d.document_type,
                 "status": d.status,
                 "page_count": d.page_count,

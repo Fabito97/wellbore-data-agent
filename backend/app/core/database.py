@@ -82,6 +82,7 @@ class Document(Base):
     page_count = Column(Integer, default=0)
     word_count = Column(Integer, default=0)
     table_count = Column(Integer, default=0)
+    image_count = Column(Integer, default=0)
     chunk_count = Column(Integer, default=0)
 
     # Processing details

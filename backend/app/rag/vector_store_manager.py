@@ -161,10 +161,92 @@ class VectorStoreManager:
         logger.info(f"Deleted {deleted_count} chunks")
         return deleted_count
 
+
+
+    def get_by_document_id_or_type(self, document_id: Optional[str] = None, document_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve all chunks for a specific document.
+        """
+        logger.info(f"Retrieving chunks for document: {document_id or document_type}")
+
+        # Query to find all chunks for this document
+        # LangChain Chroma supports where filters
+        collection = self.vector_store._collection
+
+        where = {}
+        if document_id:
+            where = {"document_id": document_id}
+        elif document_type:
+            where = {"document_type": document_type}
+        else:
+            logger.error(f"No document id or document_type provided")
+            return []
+
+        # Get all IDs matching this document
+        results = collection.get(
+            where=where,
+            include=["metadatas", "documents", ]
+        )
+
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+
+        if not ids:
+            logger.warning(f"No chunks found for document {document_id if document_id else document_type}")
+            return []
+
+        logger.info(f"Retrieved {len(results)} results")
+        return [
+            {
+            'chunk_id': ids[i],
+            'content': docs[i],
+            'metadata': metas[i],
+            }
+            for i in range(len(ids))
+        ]
+
+    def get_by_chunk_type(self, chunk_type: str = "text") -> List[Dict[str, Any]]:
+        """
+        Retrieve chunks by chunk_type.
+        Valid chunk types include: 'text', 'table', etc.
+        """
+
+        logger.info(f"Retrieving chunks of type: {chunk_type}")
+
+        # LangChain Chroma uses where filters inside collection.get()
+        where = {"chunk_type": chunk_type}
+
+        results = self.collection.get(
+            where=where,
+            include=["metadatas", "documents"]
+        )
+
+        # Validate existence
+        if not results or not results.get("ids"):
+            logger.warning(f"No chunks found for chunk_type: {chunk_type}")
+            return []
+
+        ids = results["ids"]
+        docs = results["documents"]
+        metas = results["metadatas"]
+
+        logger.info(f"Retrieved {len(ids)} chunks of type: {chunk_type}")
+
+        # Build unified result list
+        return [
+            {
+                "chunk_id": ids[i],
+                "content": docs[i],
+                "metadata": metas[i]
+            }
+            for i in range(len(ids))
+        ]
+
     def get_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         """Get chunk by ID."""
         try:
-            results = self.collection.get(ids=[chunk_id])
+            results = self.collection.get(ids=[chunk_id], include=["metadatas", "documents", "embeddings"])
 
             if not results or not results['ids']:
                 return None
