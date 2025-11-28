@@ -5,9 +5,10 @@ This module centralizes all application settings using Pydantic for type safety
 and validation. Settings are loaded from environment variables.
 """
 import os
+
+from langchain_community.document_loaders.notiondb import DATABASE_URL
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from typing import Optional
 
 class Settings(BaseSettings):
     """
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         # Set default for DATABASE_URL if not provided
         if 'DATABASE_URL' not in kwargs:
-            self.DATABASE_URL = f"sqlite:///{self.DATA_DIR / 'wellbore_agent.db'}"
+            self.DATABASE_URL = self.DATABASE_URL = f"sqlite:///{self.DATA_DIR / 'wellbore_agent.db'}"
         self._create_directories()
 
     # ... (the rest of the existing file)
@@ -76,6 +77,10 @@ class Settings(BaseSettings):
         return self.DATA_DIR / "raw"
 
     @property
+    def FAILED_DIR(self) -> Path:
+        return self.DATA_DIR / "failed"
+
+    @property
     def VECTOR_DB_DIR(self) -> Path:
         return self.DATA_DIR / "vector_db"
 
@@ -96,6 +101,13 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
     LLM_TOP_P: float = 0.9
+
+    # Huggingface
+    HF_TOKEN: str
+    # Gemini
+    GEMINI_API_KEY: str
+    # Groq
+    GROQ_API_KEY: str
 
     # ==================== Embedding Configuration ====================
     # Embedding model - must be specified
@@ -126,12 +138,6 @@ class Settings(BaseSettings):
     MAX_AGENT_ITERATIONS: int = 5
     AGENT_STREAMING: bool = True
 
-    # ==================== Nodal Analysis API ====================
-    # Must be configured in .env
-    NODAL_API_URL: str  # e.g., "http://localhost:8001/api/nodal-analysis"
-    NODAL_API_TIMEOUT: int = 30
-    NODAL_API_MOCK: bool = True  # Switch to False when real API is ready
-
     # ==================== Performance & Resource Limits ====================
     MAX_CONCURRENT_REQUESTS: int = 3
     WS_HEARTBEAT_INTERVAL: int = 30
@@ -147,6 +153,7 @@ class Settings(BaseSettings):
             self.UPLOAD_DIR,
             self.PROCESSED_DIR,
             self.RAW_DIR,
+            self.FAILED_DIR,
             self.VECTOR_DB_DIR,
         ]
 
@@ -163,18 +170,27 @@ class Settings(BaseSettings):
         errors = []
 
         # Check Ollama config
-        if not self.OLLAMA_BASE_URL:
-            errors.append("OLLAMA_BASE_URL is required")
-        if not self.OLLAMA_MODEL:
-            errors.append("OLLAMA_MODEL is required")
-        if not self.HF_TOKEN:
-            errors.append("HF_TOKEN is required")
-        # Check embedding config
+        if self.LLM_PROVIDER == "ollama":
+            if not self.OLLAMA_BASE_URL:
+                errors.append("OLLAMA_BASE_URL is required")
+            if not self.OLLAMA_MODEL:
+                errors.append("OLLAMA_MODEL is required")
+
+        elif self.LLM_PROVIDER == "huggingface":
+            if not self.HF_TOKEN:
+                errors.append("HF_TOKEN is required")
+
+        elif self.LLM_PROVIDER == "gemini":
+            if not self.GEMINI_API_KEY:
+                errors.append("GEMINI_API_KEY is required")
+
+        elif self.LLM_PROVIDER == "groq":
+            if not self.GROQ_API_KEY:
+                errors.append("GROQ_API_KEY is required")
+
+            # Embedding config (common requirement)
         if not self.EMBEDDING_MODEL:
             errors.append("EMBEDDING_MODEL is required")
-        # Check nodal API config
-        if not self.NODAL_API_URL:
-            errors.append("NODAL_API_URL is required")
 
         return errors
 
@@ -196,94 +212,3 @@ def get_settings() -> Settings:
             return {"model": settings.OLLAMA_MODEL}
     """
     return settings
-
-
-def validate_ollama_connection() -> bool:
-    """
-    Check if Ollama is running and accessible.
-
-    Returns:
-        bool: True if Ollama is accessible, False otherwise
-    """
-    import httpx
-
-    try:
-        response = httpx.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=5)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-
-def validate_ollama_model() -> bool:
-    """
-    Check if the configured model is available in Ollama.
-
-    Returns:
-        bool: True if model exists, False otherwise
-    """
-    import httpx
-
-    try:
-        response = httpx.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=5)
-        if response.status_code == 200:
-            models = response.json().get("models", [])
-            model_names = [m["name"] for m in models]
-            return settings.OLLAMA_MODEL in model_names
-        return False
-    except Exception:
-        return False
-
-
-if __name__ == "__main__":
-    """Test configuration loading."""
-    print("=" * 60)
-    print("WELLBORE AI AGENT - Configuration Test")
-    print("=" * 60)
-
-    # Check for validation errors
-    errors = settings.validate_required_settings()
-    if errors:
-        print("\n❌ Configuration Errors:")
-        for error in errors:
-            print(f"   - {error}")
-        print("\n💡 Please check your .env file")
-        exit(1)
-
-    # Display key settings
-    print(f"\n📱 Application:")
-    print(f"   Name: {settings.APP_NAME}")
-    print(f"   Version: {settings.APP_VERSION}")
-    print(f"   Debug: {settings.DEBUG}")
-
-    print(f"\n🤖 LLM Settings:")
-    print(f"   Ollama URL: {settings.OLLAMA_BASE_URL}")
-    print(f"   HF Token: {settings.HF_TOKEN[:5] + ("*" * 10)}")
-    print(f"   Model: {settings.OLLAMA_MODEL}")
-    print(f"   Temperature: {settings.LLM_TEMPERATURE}")
-
-    print(f"\n🔤 Embedding Settings:")
-    print(f"   Model: {settings.EMBEDDING_MODEL}")
-    print(f"   Dimension: {settings.EMBEDDING_DIMENSION}")
-
-    print(f"\n📁 Storage Paths:")
-    print(f"   Upload Dir: {settings.UPLOAD_DIR}")
-    print(f"   Vector DB: {settings.VECTOR_DB_DIR}")
-
-    print(f"\n🔍 RAG Settings:")
-    print(f"   Chunk Size: {settings.CHUNK_SIZE}")
-    print(f"   Top K: {settings.RETRIEVAL_TOP_K}")
-
-    print(f"\n🔌 Validating Ollama Connection...")
-    if validate_ollama_connection():
-        print("   ✅ Ollama is running")
-
-        if validate_ollama_model():
-            print(f"   ✅ Model '{settings.OLLAMA_MODEL}' is available")
-        else:
-            print(f"   ⚠️  Model '{settings.OLLAMA_MODEL}' not found")
-            print(f"   💡 Run: ollama pull {settings.OLLAMA_MODEL}")
-    else:
-        print("   ❌ Ollama is not accessible")
-        print("   💡 Run: ollama serve")
-
-    print("\n" + "=" * 60)

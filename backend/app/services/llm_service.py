@@ -16,6 +16,8 @@ import json
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
+from pydantic import SecretStr
+
 from app.core.config import settings
 from app.models.message import Message
 
@@ -43,6 +45,8 @@ class LLMProvider(str, Enum):
     """Supported LLM providers."""
     OLLAMA = "ollama"
     HUGGINGFACE = "huggingface"
+    GEMINI = 'gemini'
+    GROQ = "groq"
     # OPENAI = "openai"
     # ANTHROPIC = "anthropic"
     # AZURE = "azure"
@@ -55,13 +59,13 @@ class LLMService:
             provider: LLMProvider = LLMProvider.OLLAMA,
             model: Optional[str] = None,
             temperature: Optional[float] = None,
-            api_key: Optional[str] = None,
+            api_key: Optional[SecretStr | str] = None,
             base_url: Optional[str] = None
     ):
         self.provider = provider or settings.LLM_PROVIDER
         self.model = model or self._get_default_model(provider)
         self.temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
-        self.api_key = api_key if api_key is not None else settings.HF_TOKEN
+        self.api_key = api_key or ""
         self.base_url = base_url or self._get_default_base_url(provider)
 
         self.llm = self._initialize_provider()
@@ -73,14 +77,15 @@ class LLMService:
     def _get_default_model(self, provider: LLMProvider) -> str:
         defaults = {
             LLMProvider.OLLAMA: settings.OLLAMA_MODEL,
-            LLMProvider.HUGGINGFACE: "microsoft/Phi-3-mini-4k-instruct"
+            LLMProvider.HUGGINGFACE: "microsoft/Phi-3-mini-4k-instruct",
+            LLMProvider.GEMINI: "gemini-1.5-flash",
+            LLMProvider.GROQ: "llama-3.1-8b-instant",
         }
         return defaults.get(provider, "")
 
     def _get_default_base_url(self, provider: LLMProvider) -> str:
         defaults = {
             LLMProvider.OLLAMA: settings.OLLAMA_BASE_URL,
-            LLMProvider.HUGGINGFACE: None
         }
         return defaults.get(provider)
 
@@ -125,6 +130,33 @@ class LLMService:
             )
         elif self.provider == LLMProvider.HUGGINGFACE:
             return self._initialize_huggingface_provider()
+
+        elif self.provider == LLMProvider.GEMINI:
+            if not self.api_key:
+                raise ValueError("Gemini requires an API key")
+
+            from langchain_gemini import ChatGoogleGenerativeAI
+
+            return ChatGoogleGenerativeAI(
+                model=self.model,  # pick default
+                api_key=self.api_key,
+                temperature=self.temperature,
+                max_output_tokens=settings.LLM_MAX_TOKENS,
+            )
+
+        elif self.provider == LLMProvider.GROQ:
+            if not self.api_key:
+                raise ValueError("Groq requires an API key")
+
+            from langchain_groq import ChatGroq
+
+            return ChatGroq(
+                model=self.model,  # Groq defaults
+                api_key=self.api_key,
+                temperature=self.temperature,
+                max_tokens=settings.LLM_MAX_TOKENS,
+            )
+
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
@@ -139,6 +171,7 @@ class LLMService:
             elif msg.sender.lower() == "system":
                 lc_messages.append(SystemMessage(content=msg.content))
         return lc_messages
+
 
     def generate(
             self,
@@ -323,10 +356,10 @@ def get_llm_service(
     global _llm_service_instance
 
     # Determine the provider from arguments or settings
-    llm_provider: LLMProvider = provider or settings.LLM_PROVIDER
+    llm_provider = provider or settings.LLM_PROVIDER
 
     # If a non-default configuration is requested, create a new instance
-    if llm_provider != LLMProvider.OLLAMA or model or api_key:
+    if llm_provider != LLMProvider.OLLAMA or (model or api_key):
         logger.info(f"Creating new LLMService instance for provider={llm_provider.value}")
         return LLMService(provider=llm_provider, model=model, api_key=api_key)
 
