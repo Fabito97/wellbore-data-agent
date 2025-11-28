@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 import json
 
+from app.rag.retriever import get_retriever
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.rag.document_processor import process_pdf
@@ -47,7 +49,7 @@ def test_full_pipeline(pdf_path: Path, store: VectorStore):
 
     # Step 1: Process PDF
     print("\n⏳ Step 1/4: Processing PDF...")
-    doc = process_pdf(pdf_path)
+    doc = process_pdf(pdf_path,"well-1_20251127112111_001", "well-1", document_type="PVT")
     print(f"   ✅ Extracted {doc.page_count} pages")
 
     # Step 2: Chunk document
@@ -66,7 +68,7 @@ def test_full_pipeline(pdf_path: Path, store: VectorStore):
     print(f"   ✅ Added {added} chunks to store")
 
     print(f"\n🎉 Pipeline complete!")
-    print(f"   Document '{doc.filename}' is now searchable")
+    print(f" Document '{doc.filename}' is now searchable")
 
     return doc, chunks
 
@@ -92,7 +94,7 @@ def test_basic_search(store: VectorStore):
             print(f"   Found {len(results)} results:")
             for i, result in enumerate(results, 1):
                 similarity = result.get('similarity_score', 0)
-                content_preview = result['content'][:100] + "..."
+                content_preview = result['content'][:300] + "..."
                 page = result['metadata'].get('page_number', '?')
 
                 print(f"\n   {i}. Similarity: {similarity:.4f} | Page: {page}")
@@ -136,6 +138,8 @@ def test_metadata_filtering(store: VectorStore):
     print(f"   Query: 'completion'")
     print(f"   Filter: page_number <= 5")
     print(f"   Results: {len(results)} chunks found")
+    for result in results[:5]:
+        print(f"   Preview: {result['metadata'].get('page_number')}")
 
 
 def test_retrieval_quality(store: VectorStore):
@@ -301,7 +305,7 @@ def test_semantic_understanding(store: VectorStore):
 
 def main():
     """Run all vector store tests."""
-
+    CONFIRM = "Press enter to continue"
     # Check if PDF provided
     if len(sys.argv) > 1:
         pdf_path = Path(sys.argv[1])
@@ -310,11 +314,10 @@ def main():
             sys.exit(1)
     else:
         pdf_path = None
-
     print("\n" + "=" * 70)
     print("🗄️  VECTOR STORE TEST SUITE")
     print("=" * 70)
-
+    input(CONFIRM)
     # Initialize store
     store = test_store_initialization()
 
@@ -322,7 +325,8 @@ def main():
     doc = None
     chunks = []
     if pdf_path:
-        print(f"\n📄 Testing with: {pdf_path.name}")
+        print(f"\n📄 Testing with embedding: {pdf_path.name}")
+        input(CONFIRM)
         doc, chunks = test_full_pipeline(pdf_path, store)
     else:
         print("\n⚠️  No PDF provided - some tests will be skipped")
@@ -331,20 +335,33 @@ def main():
     # Run search tests (require existing data)
     current_count = store.get_stats()['total_chunks']
     if current_count > 0:
+        print(f"Testing basic search")
+        input(CONFIRM)
         test_basic_search(store)
+        print(f"Testing metadata filtering")
+        input(CONFIRM)
         test_metadata_filtering(store)
+        print(f"Testing retrieval quality")
+        input(CONFIRM)
         test_retrieval_quality(store)
+        print(f"Testing semantic understanding")
+        input(CONFIRM)
         test_semantic_understanding(store)
-
+        print(f"Testing get chunks by id")
+        input(CONFIRM)
         if chunks:
             test_get_by_id(store, chunks)
     else:
         print("\n⚠️  No data in store - add documents first to test search")
 
     # Test persistence
+    print("Testing persistence")
+    input(CONFIRM)
     test_persistence()
 
     # Test deletion (if we added a document)
+    print("Testing deletion")
+    input(CONFIRM)
     if doc:
         test_delete_operations(store, doc.document_id)
 

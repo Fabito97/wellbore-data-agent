@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional
 import pdfplumber
 import fitz  # PyMuPDF
+from sympy.codegen.ast import continue_
 
 from app.core.config import settings
 from app.models.document import (
@@ -297,24 +298,47 @@ class PDFExtractor:
         Returns:
             List of image metadata dicts
         """
-        # Build path:
-        # <UPLOAD_DIR>/<well_id>/images/
+        # Build path: e.g. UPLOAD_DIR/<well_id>/images/
+
         folder = well_id or "unknown_well"
         images_dir = settings.UPLOAD_DIR / folder / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
 
         image_list = []
+        seen_hashes = set()
+
         for idx, img in enumerate(page.get_images(full=True)):
             xref = img[0]
             pix = fitz.Pixmap(page.parent, xref)
             image_path = images_dir / f"{file_path.stem}_page{page_number}_img{idx}.png"
             pix.save(image_path)
 
+            # ---- Filtering heuristics ---
+            x0, y0, x1, y1 = img[1:5]
+            width, height = x1 - x0, y1 - y0
+
+            if width < 50 or height < 50: # skip tiny images
+                continue
+
+            if image_path.stat().st_size < 10_000: # skip very small files (10kb)
+                continue
+
+            # duplicate check
+            import hashlib
+            with open(image_path, "rb") as f:
+                file_hash = hashlib.md5(f.read()).hexdigest()
+
+            if file_hash in seen_hashes:
+                continue
+
+            seen_hashes.add(file_hash)
+
+            # Keep relevant images
             image_data = ImageData(
                 page_number=page_number,
                 image_index=idx,
                 file_path=str(image_path),
-                bbox=None,  # could be filled with img[1:5] if you want coordinates
+                bbox=img[1:5],  # could be filled with img[1:5] if you want coordinates
                 detected_by="pymupdf",
                 extraction_method="embedded",
                 ocr_text=None,
