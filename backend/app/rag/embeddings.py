@@ -87,7 +87,7 @@ class EmbeddingGenerator:
             embeddings = self.model.embed_documents(batch)
             all_embeddings.extend(embeddings)
 
-            if show_progress and (i // batch_size + 1) % 3 == 0:
+            if show_progress and (i // batch_size + 1) % 10 == 0:
                 progress = (i + batch_size) / len(texts) * 100
                 logger.info(f"Embedding progress: {progress:.0f}%")
 

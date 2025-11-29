@@ -111,7 +111,7 @@ class DocumentService:
                             well_name=well_name,
                             document_type=doc_type,
                             original_folder_path=str(file_path.parent.relative_to(folder_path)),
-                            file_format =file_path.name.suffix
+                            file_format = file_path.suffix.lstrip(".")
                         )
 
                         if isinstance(resp, DocumentUploadResponse):

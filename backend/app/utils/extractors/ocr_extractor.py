@@ -35,7 +35,7 @@ class OCRExtractor:
 
             self.pytesseract = pytesseract
             self.convert_from_path = convert_from_path
-            self.available = True
+            self.available = False
 
             logger.info("OCR extractor initialized")
 
@@ -62,6 +62,7 @@ class OCRExtractor:
         """
         if not self.available:
             return None
+
         image = None
         try:
             # Convert PDF page to image
@@ -115,8 +116,9 @@ class OCRExtractor:
         finally:
             # force garbage collection of image objects
             if image is not None:
-                import gc
-
+                image.close()
                 del image
-                gc.collect()
+
+            import gc
+            gc.collect()
 
