@@ -5,7 +5,7 @@ New tables:
 - wells: Store well metadata
 - documents: Store document metadata (chunks in vector DB)
 """
-import logging
+from app.utils.logger import  get_logger
 from sqlalchemy import (
     create_engine, Column, String, DateTime, ForeignKey,
     Text, Integer, Float, Boolean, JSON
@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from sqlalchemy.sql import func
 from app.core.config import settings
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ==================== SQLAlchemy Setup ====================
 engine = create_engine(
@@ -142,13 +142,13 @@ def reset_database():
     try:
         # Drop all tables
         Base.metadata.drop_all(bind=engine)
-        logging.info("Database tables dropped")
+        logger.info("Database tables dropped")
 
         # Recreate all tables
         Base.metadata.create_all(bind=engine)
-        logging.info("Database tables recreated")
+        logger.info("Database tables recreated")
     except Exception as e:
-        logging.error(f"Failed to reset database: {e}")
+        logger.error(f"Failed to reset database: {e}")
         raise
 
 

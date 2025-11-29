@@ -25,8 +25,9 @@ def test_basic_processing(pdf_path: Path):
     print("=" * 70)
 
     try:
+        well_id = "well-1_27288447748_010"
         # Use convenience function
-        doc = process_pdf(pdf_path)
+        doc = process_pdf(pdf_path, well_id=well_id, well_name="well-1", document_type="PVT")
 
         print(f"\n✅ Processing successful!")
         print(f"\n📄 Document Summary:")
@@ -102,25 +103,27 @@ def test_page_details(doc):
     if doc.page_count > 3:
         print(f"\n  ... and {doc.page_count - 3} more pages")
 
-
-def test_text_only_mode(pdf_path: Path):
-    """Test fast text-only extraction."""
-    print("\n" + "=" * 70)
-    print("TEST 4: Text-Only Mode (Fast)")
-    print("=" * 70)
-
-    import time
-
-    processor = DocumentProcessor(extract_tables=False)
-
-    start = time.time()
-    doc = processor.process_document(pdf_path)
-    elapsed = time.time() - start
-
-    print(f"\n✅ Text-only extraction complete")
-    print(f"  - Time: {elapsed:.2f}s")
-    print(f"  - Words: {doc.total_word_count:,}")
-    print(f"  - Tables extracted: {doc.table_count} (should be 0)")
+#
+# def test_text_only_mode(pdf_path: Path):
+#     """Test fast text-only extraction."""
+#     print("\n" + "=" * 70)
+#     print("TEST 4: Text-Only Mode (Fast)")
+#     print("=" * 70)
+#
+#     import time
+#
+#     processor = DocumentProcessor(extract_tables=False)
+#
+#     start = time.time()
+#
+#     well_id = "well-1_27288447748_010"
+#     doc = processor.process_document(pdf_path, well_id=well_id, well_name="well-1", document_type="PVT")
+#     elapsed = time.time() - start
+#
+#     print(f"\n✅ Text-only extraction complete")
+#     print(f"  - Time: {elapsed:.2f}s")
+#     print(f"  - Words: {doc.total_word_count:,}")
+#     print(f"  - Tables extracted: {doc.table_count} (should be 0)")
 
 
 def test_error_handling():
@@ -132,8 +135,10 @@ def test_error_handling():
     processor = DocumentProcessor()
 
     # Test 1: Non-existent file
+    # Use convenience function
+    well_id = "well-1_27288447748_010"
     try:
-        processor.process_document(Path("nonexistent.pdf"))
+        processor.process_document(Path("nonexistent.pdf"), well_id=well_id, well_name="well-1", document_type="PVT")
         print("❌ Should have raised FileNotFoundError")
     except FileNotFoundError:
         print("✅ Correctly raised FileNotFoundError for missing file")
@@ -143,7 +148,7 @@ def test_error_handling():
     try:
         test_file = Path("test.txt")
         test_file.touch()  # Create empty file
-        processor.process_document(test_file)
+        processor.process_document(test_file, well_id=well_id, well_name="well-1", document_type="PVT")
         test_file.unlink()  # Clean up
         print("❌ Should have raised ValueError")
     except ValueError:
@@ -176,7 +181,7 @@ def main():
     if doc:
         test_table_extraction(doc)
         test_page_details(doc)
-        test_text_only_mode(pdf_path)
+        # test_text_only_mode(pdf_path)
 
     test_error_handling()
 

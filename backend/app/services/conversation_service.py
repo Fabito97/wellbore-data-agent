@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 from fastapi import Depends, HTTPException
 
-from app.core.database import Conversation, Message, get_db
+from app.db.database import Conversation, Message, get_db
 from app.models.message import Message as PydanticMessage
 
 logger = get_logger(__name__)

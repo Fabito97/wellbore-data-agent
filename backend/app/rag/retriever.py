@@ -32,7 +32,6 @@ class RetrievalResult:
     similarity_score: float
     chunk_type: str  # "text" or "table"
     metadata: Dict[str, Any]
-    # well_name: Optional[str] = None
 
     def __str__(self) -> str:
         """Human-readable string representation."""
@@ -71,7 +70,7 @@ class DocumentRetriever:
         self.score_threshold = score_threshold or settings.RETRIEVAL_SCORE_THRESHOLD
 
         # Load once at startup
-        self.reranker_model = CrossEncoder("BAAI/bge-reranker-base")  # or any other reranker model
+        self.reranker_model = CrossEncoder(settings.RERANKER_MODEL)  # or any other reranker model
 
         logger.info(
             f"DocumentRetriever initialized: "
@@ -116,14 +115,6 @@ class DocumentRetriever:
             for raw in raw_results:
                 similarity = raw.get('similarity_score', 0.0)
 
-                # # Filter by threshold
-                # if similarity < self.score_threshold:
-                #     logger.debug(
-                #         f"Filtering out result with score {similarity:.3f} "
-                #         f"(threshold: {self.score_threshold})"
-                #     )
-                #     continue
-
                 # Extract metadata
                 metadata = raw.get('metadata', {})
 
@@ -150,21 +141,36 @@ class DocumentRetriever:
                 logger.warning("No candidates retrieved from vector store, returning empty list")
                 return []
 
+            filtered_results = []
             # Step 2: Apply reranker if available
             if self.reranker_model and results:
                 results = self._rerank_results(query, results)
                 logger.info('Applied reranking to retrieved chunks')
 
-            # Step 3: Ensure at least 3 results
-            if len(results) < 3:
-                logger.warning(f"Only {len(results)} results retrieved; duplicating to ensure minimum 3")
-                while len(results) < 3: results.append(results[-1])
+            # Step 3: Filter by threshold
+            filtered_results = [
+                r for r in results
+                if r.metadata.get("rerank_score_norm", r.similarity_score) >= self.score_threshold
+            ]
+
+            # Step 4: Ensure at least 3 results
+            if len(filtered_results) < 3 and results:
+                logger.warning(f"Only {len(filtered_results)} results after filtering; padding to minimum 3")
+
+                # Sort the original results (already RetrievalResult objects) by similarity
+                sorted_by_similarity = sorted(results, key=lambda r: r.similarity_score, reverse=True)
+                for candidate in sorted_by_similarity:
+                    if candidate not in filtered_results:
+                        filtered_results.append(candidate)
+                    if len(filtered_results) >= 3:
+                        break
 
             logger.info(
-                f"Retrieved {len(results)} chunks (reranked from {len(raw_results)} candidates"
+                f"Retrieved {len(filtered_results)} chunks after filtering {len(raw_results)} candidates"
             )
-            # Step 4: Return top-k
-            return results[:k]
+
+            # Step 5: Return top-k
+            return filtered_results
 
         except Exception as e:
             logger.error(f"Retrieval failed for query: `{query}`: {e}")
@@ -206,64 +212,51 @@ class DocumentRetriever:
 
     def retrieve_for_summarization(
             self,
-            well_name: Optional[str],
-            document_id: Optional[str],
+            well_name: Optional[str] = None,
+            document_id: Optional[str] = None,
+            document_type: Optional[str] = None,
+            page_range: Optional[Tuple[int, int]] = None,
+            chunk_type: Optional[str] = None,
             max_chunks: int = 20,
             chunk_index_range: Optional[Tuple[int, int]] = None
     ) -> List[RetrievalResult]:
-         """
-          Retrieve chunks for document summarization (Sub-challenge 1).
+        """
+        Retrieve chunks for summarization.
+        Uses document_id if provided, else falls back to well_name.
+            - Coverage-based (whole document or well)
+            - Order by page/chunk index (not relevance)
+        """
 
-          Different from search:
-          - Get chunks from specific document - Coverage-based (whole document)
-          - Order by page/chunk index (not relevance)
-         """
-         try:
-            where: Dict[str, any] = {}
-            if document_id:
-                where["document_id"] = document_id
-            elif well_name:
-                where["well_name"] = well_name
-
-            elif chunk_index_range:
-                where["chunk_index"] = {
-                    "$gte": chunk_index_range[0],
-                    "$lte": chunk_index_range[1]
-                }
-
-            raw_results = self.vector_store.collection.get(
-                where=where,
-                include=["documents", "metadatas"],
-                limit=max_chunks
-            )
-
-            # Convert to results
+        try:
             results = []
-            for i in range(len(raw_results['ids'])):
-                metadata = raw_results['metadatas'][i]
-
-                result = RetrievalResult(
-                    chunk_id=raw_results['ids'][i],
-                    content=raw_results['documents'][i],
-                    page_number=metadata.get('page_number', 0),
-                    document_id=metadata.get('document_id', ''),
-                    filename=metadata.get('filename', 'unknown'),
-                    document_type=metadata.get('document_type'),
-                    well_id=metadata.get('well_id', 'unknown'),
-                    well_name=metadata.get('well_name', 'unknown'),
-                    similarity_score=1.0,  # Not relevance-based
-                    chunk_type=metadata.get('chunk_type', 'text'),
-                    metadata=metadata
+            if document_id:
+                results = self.vector_store.get_by_document_id(
+                    document_id=document_id,
+                    chunk_type=chunk_type,
+                    page_range=page_range,
+                    max_chunks=max_chunks,
+                    chunk_index_range=chunk_index_range,
                 )
-                results.append(result)
+            elif well_name:
+                results = self.vector_store.get_by_well_name(
+                    well_name=well_name,
+                    chunk_type=chunk_type,
+                    page_range=page_range,
+                    document_type=document_type,
+                    max_chunks=max_chunks
+                )
+            else:
+                logger.error("Either document_id or well_name must be provided")
+                return []
 
-            # Sort by page and chunk index for logical order
-            results.sort(key=lambda x: (x.page_number, x.metadata.get('chunk_index', 0)))
+            # Sort logically
+            results.sort(key=lambda x: (x.page_number, x.metadata.get("chunk_index", 0)))
 
-            logger.info(f"Retrieved {len(results)} chunks for summarization (well={well_name}, doc={document_id})")
+            logger.info(f"Retrieved {len(results)} chunks for summarization "
+                        f"(doc={document_id}, well={well_name})")
             return results
 
-         except Exception as e:
+        except Exception as e:
             logger.error(f"Failed to retrieve for summarization: {e}")
             return []
 
@@ -272,52 +265,44 @@ class DocumentRetriever:
     def retrieve_tables_only(
             self,
             query: str,
-            well_name: Optional[str],
-            document_id: Optional[str],
+            well_name: Optional[str] = None,
+            document_id: Optional[str] = None,
             top_k: Optional[int] = None,
     ) -> List[RetrievalResult]:
-        """
-         Retrieve only table chunks (for parameter extraction).
-         """
+        """Retrieve only table chunks (for parameter extraction)."""
         filters = {"chunk_type": "table"}
         if well_name:
             filters["well_name"] = well_name
         if document_id:
             filters["document_id"] = document_id
 
-        return self.retrieve(
-            query=query,
-            top_k=top_k,
-            filters=filters,
-        )
+        return self.retrieve(query=query, top_k=top_k, filters=filters)
 
 
 
     def retrieve_from_pages(
             self,
             query: str,
-            well_name: Optional[str],
-            document_id: Optional[str],
-            page_numbers: List[int],
-            top_k: Optional[int] = None
+            well_name: Optional[str] = None,
+            document_id: Optional[str] = None,
+            page_numbers: Optional[List[int]] = None,
+            top_k: Optional[int] = None,
+            chunk_type: Optional[str] = None
     ) -> List[RetrievalResult]:
-        """
-        Retrieve from specific pages only.
-        """
-        page_filter = {"page_number": {"$in": page_numbers}}
-        # $in operator: match any of the list values
+        """Retrieve from specific pages only."""
+        if not page_numbers:
+            logger.warning("No page numbers provided for retrieve_from_pages")
+            return []
 
+        filters: Dict[str, Any] = {"page_number": {"$in": page_numbers}}
         if well_name:
-            page_filter["well_name"] = well_name
+            filters["well_name"] = well_name
         if document_id:
-            page_filter["document_id"] = document_id
-        # ChromaDB filter for page numbers
+            filters["document_id"] = document_id
+        if chunk_type:
+            filters["chunk_type"] = chunk_type
 
-        return self.retrieve(
-            query=query,
-            top_k=top_k,
-            filters=page_filter,
-        )
+        return self.retrieve(query=query, top_k=top_k, filters=filters)
 
 
 
@@ -336,24 +321,32 @@ class DocumentRetriever:
         """
         try:
             # Get the target chunk
-            target = self.vector_store.get_by_id(chunk_id)
+            target = self.vector_store.get_by_chunk_id(chunk_id)
             if not target:
+                logger.warning(f"Failed to get chunk with id: {chunk_id}")
                 return []
 
-            metadata = target['metadata']
+            metadata= target['metadata']
             document_id = metadata.get('document_id', '')
             chunk_index = metadata.get('chunk_index', 0)
+
+            # Debug logs to confirm type and value
+            logger.debug(f"Chunk_index from metadata: {chunk_index}")
 
             # Calculate range
             start_index = max(0, chunk_index - window_size)
             end_index = chunk_index + window_size
+            logger.debug(f"Context window range: {start_index} to {end_index}")
 
             # Get all chunks in range
-            return self.retrieve_for_summarization(
-                document_id,
-                max_chunks=100,
+            results = self.retrieve_for_summarization(
+                document_id=document_id,
+                max_chunks=10,
                 chunk_index_range=(start_index, end_index)
             )
+            logger.debug(f"Retrieved {len(results)} chunks for context window")
+
+            return results
 
         except Exception as e:
             logger.error(f"Failed to get context window: {e}")
@@ -384,7 +377,16 @@ class DocumentRetriever:
         max_chars = max_tokens * 4 # Rough approximation
 
         for i, result in enumerate(results, 1):
-            citation = result.citation or "No source"
+            try:
+                citation = result.citation # uses the property
+            except AttributeError:
+                # fallback if citation property is missing for some reason
+
+                citation = (f"Well: {result.well_name} | "
+                        f"Filename: {result.document_id} | "
+                        f"Page:{result.page_number} | "
+                        f"Type:{result.chunk_type}")
+
             # Format each chunk
             chunk_text = (
                 f"[Source {i}: {citation}]\n"
@@ -399,7 +401,7 @@ class DocumentRetriever:
             context_parts.append(chunk_text)
             total_chars += len(chunk_text)
 
-        context = "\n----\n\n".join(context_parts)
+        context = "\n============================\n\n".join(context_parts)
 
         logger.debug(
             f"Formatted context: {len(context_parts)} chunks, "

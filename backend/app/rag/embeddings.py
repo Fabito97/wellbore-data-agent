@@ -182,11 +182,8 @@ class EmbeddingGenerator:
     def model_info(self) -> dict:
         return {
             "model_name": self.model_name,
-            "device": self.device,
-            "dimension": self.model.dimension,
-            "max_seq_length": self.model.max_seq_length,
+            "device": self.device
         }
-
 
 
 # ==================== Module-level convenience functions ====================

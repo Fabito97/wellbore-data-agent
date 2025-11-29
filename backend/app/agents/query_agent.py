@@ -20,7 +20,8 @@ from app.agents.tools.rag_tool import (
     extract_parameters_tool,
     query_tables_tool
 )
-from app.services.llm_service import get_llm_service
+from app.core.config import settings
+from app.services.llm_service import get_llm_service, LLMProvider
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -220,7 +221,13 @@ class QueryAgent:
         """Initialize agent with tools and LLM."""
 
         # Get LLM from service
-        self.llm = get_llm_service().llm
+        groq_chat_model = get_llm_service(
+            provider=LLMProvider.GROQ,
+            api_key=settings.GROQ_API_KEY
+        )
+        ollama_chat_model = get_llm_service()
+        self.llm = groq_chat_model.llm
+        # self.llm = get_llm_service().llm
 
         # Create tools list
         self.tools = [

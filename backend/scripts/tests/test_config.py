@@ -13,7 +13,8 @@ from pathlib import Path
 # Add parent directory to path to import app modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.core.config import settings, validate_ollama_connection, validate_ollama_model
+from app.core.config import settings
+from app.validation.validators import  validate_ollama_connection, validate_ollama_model
 
 
 def test_configuration():

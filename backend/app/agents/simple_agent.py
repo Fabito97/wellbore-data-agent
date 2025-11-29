@@ -27,16 +27,13 @@ from app.services.llm_service import get_llm_service, LLMService
 from app.services.conversation_service import get_conversation_service, ConversationService
 from app.rag.retriever import get_retriever, DocumentRetriever
 from app.core.config import settings
-from langchain.agents import create_agent
 # Import RAG tool functions
 from app.agents.tools.rag_tool import (
-    detect_well_from_query,
     list_available_wells,
     rag_query_tool,
     summarize_well_report_tool,
     extract_parameters_tool,
 )
-from app.utils.prompts import SYSTEM_PROMPT, AGENT_PROMPT
 
 logger = get_logger(__name__)
 
@@ -246,9 +243,6 @@ class SimpleAgent:
         """
         logger.info(f"Agent processing: '{question[:100]}...'")
 
-        # # Get conversation
-        # conversation = self.conversations.get_or_create_conversation(conversation_id)
-        # self.conversations.add_message(conversation.id, "user", question)
 
         try:
             # Invoke agent
@@ -258,19 +252,6 @@ class SimpleAgent:
             # answer = self._extract_answer(result)
             response = self.parser.parse(result.get("output"))
             logger.info(f"Response: {response}")
-            # Detect well from original question (for metadata)
-            # well_name = detect_well_from_query(query=question)
-
-            # Count tool calls
-            # tool_calls = self._count_tool_calls(result)
-
-            # Save response
-            # self.conversations.add_message(conversation.id, "assistant", answer)
-
-            # Assess confidence
-            # confidence = self._assess_confidence(answer, tool_calls)
-
-            # logger.info(f"Agent completed: {tool_calls} tool calls, confidence={confidence}")
 
             return AgentResponse(
                 answer=response.answer,
@@ -308,28 +289,6 @@ class SimpleAgent:
 
         return "No response generated"
 
-    def _count_tool_calls(self, result: Dict[str, Any]) -> int:
-        """Count how many tools were called."""
-        messages = result.get("messages", [])
-        tool_calls = 0
-
-        for msg in messages:
-            if hasattr(msg, "tool_calls"):
-                tool_calls += len(msg.tool_calls)
-            elif isinstance(msg, dict) and msg.get("tool_calls"):
-                tool_calls += len(msg["tool_calls"])
-
-        return tool_calls
-
-    def _assess_confidence(self, answer: str, tool_calls: int) -> str:
-        """Assess confidence based on tool usage."""
-        if tool_calls == 0:
-            return "low"  # No tools used
-        elif tool_calls >= 2:
-            return "high"  # Multiple tools used
-        else:
-            return "medium"  # One tool used
-
 
 # ==================== FastAPI Dependency ====================
 
@@ -351,9 +310,8 @@ def get_simple_agent(
 def test_agent():
     """Test agent with sample queries."""
     from app.services.llm_service import get_llm_service
-    from app.services.conversation_service import get_conversation_service
     from app.rag.retriever import get_retriever
-    from app.core.database import SessionLocal
+    from app.db.database import SessionLocal
 
     # Initialize
     db = SessionLocal()

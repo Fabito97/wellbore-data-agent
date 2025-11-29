@@ -10,6 +10,9 @@ Usage:
 import sys
 from pathlib import Path
 import shutil
+
+from app.db.database import SessionLocal
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.utils.logger import get_logger
@@ -25,14 +28,22 @@ def ingest_test_document(pdf_path: Path) -> str:
     logger.info("STEP 1: Ingesting Document")
     logger.info("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
+
     temp_path = Path("temp_test.pdf")
     shutil.copy(pdf_path, temp_path)
 
     try:
+        well_id = "well-1_27288447748_010"
         result = service.ingest_document(
             file_path=temp_path,
-            original_filename=pdf_path.name
+            original_filename=pdf_path.name,
+            well_name="well-1",
+            well_id=well_id,
+            file_format="pdf",
+            document_type="PVT",
+            original_folder_path=str(temp_path)
         )
 
         if hasattr(result, 'error'):
@@ -66,6 +77,8 @@ def test_basic_retrieval(document_id: str):
             logger.info(f"   - {r.citation} (score: {r.similarity_score:.3f})")
     else:
         logger.info("❌ No results returned")
+
+    return results
 
 
 def test_table_retrieval(document_id: str):
@@ -113,22 +126,22 @@ def test_summarization_chunks(document_id: str):
     logger.info("=" * 70)
 
     retriever = DocumentRetriever()
-    results = retriever.retrieve_for_summarization(document_id)
+    results = retriever.retrieve_for_summarization(document_id=document_id)
 
     if results:
         logger.info(f"✅ Retrieved {len(results)} chunks for summarization")
-        logger.info(f"   First chunk: {results[0].citation}")
+        logger.info(f"   First chunk: {results[0].filename}")
     else:
         logger.info("❌ No chunks retrieved")
 
 
-def test_context_window(document_id: str):
+def test_context_window(chunK_id: str):
     logger.info("\n" + "=" * 70)
     logger.info("STEP 6: Context Window")
     logger.info("=" * 70)
 
     retriever = DocumentRetriever()
-    results = retriever.retrieve_for_summarization(document_id)
+    results = retriever.get_context_window(chunk_id=chunK_id)
 
     if not results:
         logger.info("❌ Cannot test context window — no chunks available")
@@ -141,7 +154,7 @@ def test_context_window(document_id: str):
     if window:
         logger.info(f"✅ Retrieved {len(window)} surrounding chunks")
         for r in window:
-            logger.info(f"   - {r.citation}")
+            logger.info(f"   - {r.filename}")
     else:
         logger.info("⚠️ No context window returned")
 
@@ -152,7 +165,7 @@ def test_llm_context_formatting(document_id: str):
     logger.info("=" * 70)
 
     retriever = DocumentRetriever()
-    results = retriever.retrieve_for_summarization(document_id)
+    results = retriever.retrieve_for_summarization(document_id=document_id)
 
     context = retriever.format_context_for_llm(results[:5], max_tokens=500)
     logger.info("\n🧠 Formatted Context:\n")
@@ -176,11 +189,11 @@ def main():
     document_id = ingest_test_document(pdf_path)
 
     if document_id:
-        test_basic_retrieval(document_id)
+        result = test_basic_retrieval(document_id)
         test_table_retrieval(document_id)
         test_page_filtered_retrieval(document_id)
         test_summarization_chunks(document_id)
-        test_context_window(document_id)
+        test_context_window(result[2].chunk_id)
         test_llm_context_formatting(document_id)
 
     logger.info("\n" + "=" * 70)

@@ -10,6 +10,11 @@ Usage:
 import sys
 from pathlib import Path
 import shutil
+
+from multipart import file_path
+
+from app.db.database import SessionLocal
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.utils.logger import get_logger
 
@@ -24,7 +29,8 @@ def test_document_ingestion(pdf_path: Path):
     print("TEST 1: Document Ingestion Pipeline")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     # Copy file to temp location (simulating upload)
     temp_path = Path("temp_test.pdf")
@@ -33,10 +39,15 @@ def test_document_ingestion(pdf_path: Path):
     try:
         print(f"\n📄 Ingesting: {pdf_path.name}")
         print("⏳ Running pipeline (process → chunk → embed → store)...")
-
+        well_id = "well-1_27288447748_010"
         result = service.ingest_document(
             file_path=temp_path,
-            original_filename=pdf_path.name
+            original_filename=pdf_path.name,
+            well_name="well-1",
+            well_id=well_id,
+            file_format="pdf",
+            document_type="PVT",
+            original_folder_path=str(file_path)
         )
         print(f"Result: {result}")
 
@@ -72,7 +83,8 @@ def test_document_retrieval(document_id: str):
     print("TEST 2: Document Retrieval")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     print(f"\n🔍 Retrieving document: {document_id}")
 
@@ -95,7 +107,8 @@ def test_document_status(document_id: str):
     print("TEST 3: Document Status")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     status = service.get_document_status(document_id)
 
@@ -113,7 +126,8 @@ def test_list_documents():
     print("TEST 4: List All Documents")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     docs = service.list_documents()
 
@@ -122,8 +136,8 @@ def test_list_documents():
     for i, doc in enumerate(docs, 1):
         print(f"\n   {i}. {doc['filename']}")
         print(f"      ID: {doc['document_id']}")
-        print(f"      Pages: {doc['pages']}")
-        print(f"      Chunks: {doc['chunks']}")
+        # print(f"      Pages: {doc['pages']}")
+        # print(f"      Chunks: {doc['chunks']}")
         print(f"      Status: {doc['status']}")
 
 
@@ -133,7 +147,8 @@ def test_service_stats():
     print("TEST 5: Service Statistics")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     stats = service.get_stats()
 
@@ -183,7 +198,8 @@ def test_document_deletion(document_id: str):
     print("TEST 7: Document Deletion")
     print("=" * 70)
 
-    service = get_document_service()
+    db = SessionLocal()
+    service = get_document_service(db)
 
     # Get stats before
     stats_before = service.get_stats()

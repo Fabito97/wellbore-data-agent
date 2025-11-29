@@ -9,7 +9,7 @@ from app.utils.logger import  get_logger
 import shutil
 
 from app.core.config import settings
-from app.core.database import get_db  # your SQLAlchemy session factory
+from app.db.database import get_db  # your SQLAlchemy session factory
 from app.services.document_service import DocumentService
 from app.utils.folder_utils import extract_zip_to_temp, cleanup_temp_paths
 

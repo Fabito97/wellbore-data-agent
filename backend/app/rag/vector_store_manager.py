@@ -1,10 +1,13 @@
 """
 Enhanced Vector Store - Best of both worlds.
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+
+from app.db.chroma import get_chroma_client
 from app.models.document import DocumentChunk
+from app.models.schema import RetrievalResult
 from app.utils.helper import normalize_score
 from app.utils.logger import get_logger
 from app.core.config import settings
@@ -33,20 +36,13 @@ class VectorStoreManager:
         self.embeddings = get_embeddings_model()
 
         # Initialize vector store
-        self.vector_store = Chroma(
-            collection_name=settings.CHROMA_COLLECTION_NAME,
-            embedding_function=self.embeddings,
-            persist_directory=self.persist_directory,
-            collection_metadata={
-                "hnsw:space": settings.CHROMA_DISTANCE_METRIC
-            }
-        )
+        self.vector_store = get_chroma_client(embedding_func=self.embeddings)
 
         self.collection = self.vector_store._collection
 
         logger.info("Vector store ready")
 
-    # -------------------- Enhanced Add Method --------------------
+
 
     def add_chunks(self, chunks: List[DocumentChunk]) -> int:
         """
@@ -92,7 +88,6 @@ class VectorStoreManager:
 
         return len(chunks_with_ids)
 
-    # -------------------- Enhanced Query Methods --------------------
 
     def query_similar_chunks(
             self,
@@ -111,9 +106,20 @@ class VectorStoreManager:
         logger.info(f"Querying top {top_k} chunks for: '{query[:50]}...'")
 
         # Query with filters
+        filter_clause = {}
         if filters:
+            # If multiple conditions, wrap in $and
+            if len(filters) > 1:
+                filter_clause = {
+                    "$and": [
+                        {key: value} for key, value in filters.items()
+                    ]
+                }
+            else:
+                filter_clause = filters  # ← FIXED: was "filters_clause"
+
             results = self.vector_store.similarity_search_with_score(
-                query, k=top_k, filter=filters  # LangChain supports this!
+                query, k=top_k, filter=filter_clause  # LangChain supports this!
             )
         else:
             results = self.vector_store.similarity_search_with_score(
@@ -126,14 +132,179 @@ class VectorStoreManager:
             formatted.append({
                 "content": doc.page_content,
                 "metadata": doc.metadata,
-                "similarity_score": 1 - distance, # normalize_score(distance)  # Convert distance to similarity
-                "chunk_id": doc.metadata.get("chunk_id", "")
+                "similarity_score": 1 - distance,  # normalize_score(distance)  # Convert distance to similarity
+                "chunk_id": doc.id
             })
 
         logger.info(f"Found {len(formatted)} results")
         return formatted
 
+
     # -------------------- Document-Level Operations --------------------
+
+    def get_by_document_id(
+            self, document_id: Optional[str] = None,
+            chunk_type: Optional[str] = None,
+            page_range: Optional[Tuple[int, int]] = None,
+            max_chunks: Optional[int] = None,
+            chunk_index_range: Optional[Tuple[int, int]] = None
+    ) -> List[RetrievalResult]:
+        """
+        Retrieve chunks for a specific document with optional filters.
+        Supports compound filtering using $and:
+        - document_id (required)
+        - chunk_type (optional)
+        - page_range (optional, inclusive range of page_number)
+        - max_chunks (optional, limit number of chunks returned)
+        """
+
+        logger.info(f"Retrieving chunks for document: {document_id}")
+
+        # Query to find all chunks for this document
+        # LangChain Chroma supports where filters
+        collection = self.collection
+
+        # Build compound filters
+        filters: List[Dict[str, Any]] = [{"document_id": document_id}]  # always included
+
+        if chunk_type:
+            filters.append({"chunk_type": chunk_type})
+        if page_range:
+            filters.append({"page_number": {"$gte": page_range[0]}})
+            filters.append({"page_number": {"$lte": page_range[1]}})
+
+        if chunk_index_range:
+            filters.append({"chunk_index": {"$gte": chunk_index_range[0]}})
+            filters.append({"chunk_index": {"$lte": chunk_index_range[1]}})
+
+        # Combine with $and if multiple filters
+        where = filters[0] if len(filters) == 1 else {"$and": filters}
+
+        # Query collection
+        # Get all chunks matching this document with filters
+        results = collection.get(
+            where=where,
+            include=["metadatas", "documents", ],
+            limit=max_chunks if max_chunks else None
+        )
+
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+
+        if not ids:
+            logger.warning(f"No chunks found for document {document_id}")
+            return []
+
+        logger.info(f"Retrieved {len(results)} results")
+        return [
+            RetrievalResult(
+                chunk_id=ids[i],
+                content=docs[i],
+                page_number=metas[i].get("page_number", 0),
+                document_id=metas[i].get("document_id", ""),
+                filename=metas[i].get("filename", "unknown"),
+                document_type=metas[i].get("document_type"),
+                well_id=metas[i].get("well_id", "unknown"),
+                well_name=metas[i].get("well_name", "unknown"),
+                similarity_score=1.0,
+                chunk_type=metas[i].get("chunk_type", "text"),
+                metadata=metas[i],
+            )
+            for i in range(len(ids))
+        ]
+
+
+    def get_by_well_name(
+            self,
+            well_name: str,
+            chunk_type: Optional[str] = None,
+            page_range: Optional[Tuple[int, int]] = None,
+            max_chunks: Optional[int] = None,
+            document_type: Optional[str] = None
+    ) -> List[RetrievalResult]:
+        """
+        Retrieve chunks for a specific well with optional filters.
+        Supports compound filtering using $and:
+        - well_name (required)
+        - chunk_type (optional)
+        - page_range (optional)
+        - chunk_index_range (optional)
+        - max_chunks (optional limit)
+        """
+
+        logger.info(f"Retrieving chunks for well: {well_name} and type: {document_type}, "
+                    f"chunk_type={chunk_type}, page_range={page_range}, ")
+
+        filters: List[Dict[str, Any]] = [{"well_name": well_name}]
+        if document_type:
+            filters.append({"document_type": document_type})
+        if chunk_type:
+            filters.append({"chunk_type": chunk_type})
+        if page_range:
+            filters.append({"page_number": {"$gte": page_range[0], "$lte": page_range[1]}})
+
+        where = filters[0] if len(filters) == 1 else {"$and": filters}
+
+        results = self.collection.get(
+            where=where,
+            include=["metadatas", "documents"],
+            limit=max_chunks if max_chunks else None
+        )
+
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+
+        if not ids:
+            logger.warning(f"No chunks found for well {well_name}")
+            return []
+
+        return [
+            RetrievalResult(
+                chunk_id=ids[i],
+                content=docs[i],
+                page_number=metas[i].get("page_number", 0),
+                document_id=metas[i].get("document_id", ""),
+                filename=metas[i].get("filename", "unknown"),
+                document_type=metas[i].get("document_type"),
+                well_id=metas[i].get("well_id", "unknown"),
+                well_name=metas[i].get("well_name", "unknown"),
+                similarity_score=1.0,
+                chunk_type=metas[i].get("chunk_type", "text"),
+                metadata=metas[i],
+            )
+            for i in range(len(ids))
+        ]
+
+
+    def get_by_chunk_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
+        """Get chunk by ID."""
+        try:
+            results = self.collection.get(ids=[chunk_id], include=["metadatas", "documents", "embeddings"])
+
+            logger.debug("Checking if chunk exists")
+            ids = results.get('ids', [])
+            logger.debug("Checking if chunk exists")
+            if len(ids) == 0:
+                logger.warning(f"No chunks found for document {chunk_id}")
+                return None
+
+            logger.debug(f"Retrieved {len(ids)} results")
+
+            embeddings = results.get('embeddings', [])
+            embedding = embeddings[0] if len(embeddings) > 0 else None
+
+            return {
+                'chunk_id': ids[0],
+                'content': results['documents'][0],
+                'metadata': results['metadatas'][0],
+                'embedding': embedding,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get chunk {chunk_id}: {e}")
+            return None
+
 
     def delete_by_document_id(self, document_id: str) -> int:
         """
@@ -143,14 +314,15 @@ class VectorStoreManager:
 
         # Query to find all chunks for this document
         # LangChain Chroma supports where filters
-        collection = self.vector_store._collection
+        collection = self.collection
 
         # Get all IDs matching this document
         results = collection.get(
             where={"document_id": document_id}
         )
 
-        if not results or not results['ids']:
+        ids = results.get('ids', [])
+        if len(ids) == 0:
             logger.warning(f"No chunks found for document {document_id}")
             return 0
 
@@ -162,105 +334,6 @@ class VectorStoreManager:
         return deleted_count
 
 
-
-    def get_by_document_id_or_type(self, document_id: Optional[str] = None, document_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Retrieve all chunks for a specific document.
-        """
-        logger.info(f"Retrieving chunks for document: {document_id or document_type}")
-
-        # Query to find all chunks for this document
-        # LangChain Chroma supports where filters
-        collection = self.vector_store._collection
-
-        where = {}
-        if document_id:
-            where = {"document_id": document_id}
-        elif document_type:
-            where = {"document_type": document_type}
-        else:
-            logger.error(f"No document id or document_type provided")
-            return []
-
-        # Get all IDs matching this document
-        results = collection.get(
-            where=where,
-            include=["metadatas", "documents", ]
-        )
-
-        ids = results.get("ids", [])
-        docs = results.get("documents", [])
-        metas = results.get("metadatas", [])
-
-        if not ids:
-            logger.warning(f"No chunks found for document {document_id if document_id else document_type}")
-            return []
-
-        logger.info(f"Retrieved {len(results)} results")
-        return [
-            {
-            'chunk_id': ids[i],
-            'content': docs[i],
-            'metadata': metas[i],
-            }
-            for i in range(len(ids))
-        ]
-
-    def get_by_chunk_type(self, chunk_type: str = "text") -> List[Dict[str, Any]]:
-        """
-        Retrieve chunks by chunk_type.
-        Valid chunk types include: 'text', 'table', etc.
-        """
-
-        logger.info(f"Retrieving chunks of type: {chunk_type}")
-
-        # LangChain Chroma uses where filters inside collection.get()
-        where = {"chunk_type": chunk_type}
-
-        results = self.collection.get(
-            where=where,
-            include=["metadatas", "documents"]
-        )
-
-        # Validate existence
-        if not results or not results.get("ids"):
-            logger.warning(f"No chunks found for chunk_type: {chunk_type}")
-            return []
-
-        ids = results["ids"]
-        docs = results["documents"]
-        metas = results["metadatas"]
-
-        logger.info(f"Retrieved {len(ids)} chunks of type: {chunk_type}")
-
-        # Build unified result list
-        return [
-            {
-                "chunk_id": ids[i],
-                "content": docs[i],
-                "metadata": metas[i]
-            }
-            for i in range(len(ids))
-        ]
-
-    def get_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
-        """Get chunk by ID."""
-        try:
-            results = self.collection.get(ids=[chunk_id], include=["metadatas", "documents", "embeddings"])
-
-            if not results or not results['ids']:
-                return None
-
-            return {
-                'chunk_id': results['ids'][0],
-                'content': results['documents'][0],
-                'metadata': results['metadatas'][0],
-                'embedding': results['embeddings'][0] if results.get('embeddings') else None
-            }
-        except Exception as e:
-            logger.error(f"Failed to get chunk {chunk_id}: {e}")
-            return None
-
     # -------------------- Stats (NEW!) --------------------
 
     def get_stats(self) -> Dict[str, Any]:
@@ -268,9 +341,7 @@ class VectorStoreManager:
         Get vector store statistics.
 
         """
-        collection = self.vector_store._collection
-
-        count = collection.count()
+        count = self.collection.count()
 
         return {
             "collection_name": settings.CHROMA_COLLECTION_NAME,
@@ -290,14 +361,7 @@ class VectorStoreManager:
         self.vector_store.delete_collection()
 
         # Recreate empty collection
-        self.vector_store = Chroma(
-            collection_name=settings.CHROMA_COLLECTION_NAME,
-            embedding_function=self.embeddings,
-            persist_directory=self.persist_directory,
-            collection_metadata={
-                "hnsw:space": settings.CHROMA_DISTANCE_METRIC
-            }
-        )
+        self.vector_store = get_chroma_client(embedding_func=self.embeddings)
 
         logger.info("Vector store cleared and recreated")
 

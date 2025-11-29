@@ -58,6 +58,7 @@ class ImageExtractor:
             pix = fitz.Pixmap(page.parent, xref)
             image_path = images_dir / f"{file_path.stem}_page{page_number}_img{idx}.png"
             pix.save(image_path)
+            pix = None # release Pixmap
 
             # ---- Filtering heuristics ---
             x0, y0, x1, y1 = img[1:5]

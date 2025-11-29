@@ -1,117 +1,174 @@
 """
-Mini LangGraph Agent - Simple Q&A Only
+Efficient Single-Node Agent
+
+Key Improvement: ONE LLM call per interaction
+- LLM decides everything at once
+- Can answer directly OR provide search params
+- No separate classification/strategy nodes
+- Optimized for speed AND accuracy
 
 Flow:
-1. LLM decides: list wells, get well info, or search?
-2. If search: LLM provides search params (query, filters)
-3. Execute search
-4. LLM generates answer
+User → [LLM Agent] → Answer OR Search → Answer
+     ONE call          (if needed)  ONE call
 """
-from typing import TypedDict, Literal, Optional, Dict, Any, List
+from typing import TypedDict, Literal, Optional, Dict, Any, List, Sequence, Union
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
-import json
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 
-from app.agents.tools.rag_tool import list_available_wells, get_well_by_name, rag_query_tool
+from app.agents.tools.rag_tool import rag_query_tool
+from app.core.config import settings
 from app.rag.retriever import get_retriever
-from app.services.llm_service import get_llm_service
+from app.services.llm_service import get_llm_service, LLMProvider
 from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
+name = "Agent" if __name__ == "__main__" else __name__
+logger = get_logger(name)
 
 
-# ==================== Pydantic Schemas ====================
+# ==================== Domain Knowledge ====================
 
-class AgentDecision(BaseModel):
-    """LLM decides what action to take."""
-    action: Literal["list_wells", "get_well", "search", "answer"] = Field(
-        description="What to do next"
+DOMAIN_CONTEXT = """
+SYSTEM CONTEXT:
+You are analyzing well completion data from oil & gas operations.
+
+DOCUMENT TYPES:
+- WELL_REPORT: Completion specs (tubing, casing, depths, reservoir data)
+- PVT: Fluid properties (API gravity, viscosity, GOR)
+- PRODUCTION: Production rates and test data
+
+SEARCH PARAMETERS:
+- document_type: Use "WELL_REPORT" for completion data (default)
+- chunk_type: Use "table" for technical specs/numbers, "text" for descriptions
+- well_name: Always required for specific well queries (format: "well-1")
+"""
+
+
+# ==================== Single Response Schema ====================
+
+class AgentAction(BaseModel):
+    """LLM decides everything in ONE call."""
+
+    action: Literal["answer", "search", "clarify"] = Field(
+        description="What to do: answer directly, search documents, or ask for clarification"
     )
-    well_name: Optional[str] = Field(description="Well name if needed (e.g., 'well-1')")
+
+    # For direct answers
+    direct_answer: Optional[str] = Field(
+        default=None,
+        description="If action='answer', provide the answer here"
+    )
+
+    # For searches
+    search_query: Optional[str] = Field(
+        default=None,
+        description="If action='search', the search query"
+    )
+    well_name: Optional[str] = Field(
+        default=None,
+        description="If action='search', which well to search"
+    )
+    document_type: Optional[str] = Field(
+        default=None,
+        description="If action='search', document type (WELL_REPORT, PVT_REPORT, etc.)"
+    )
+    chunk_type: Optional[str] = Field(
+        default=None,
+        description="If action='search', chunk type ('table', 'text', or null)"
+    )
+
+    # For clarifications
+    clarification_question: Optional[str] = Field(
+        default=None,
+        description="If action='clarify', what to ask user"
+    )
+
     reasoning: str = Field(description="Why this action?")
-
-
-class SearchParameters(BaseModel):
-    """LLM provides search parameters."""
-    query: str = Field(description="Optimized search query")
-    well_name: Optional[str] = Field(description="Filter by well (e.g., 'well-1')")
-    document_id: Optional[str] = Field(description="Filter by specific document ID")
-    document_type: Optional[str] = Field(description="Filter by type (e.g., 'WELL_REPORT')")
-    chunk_type: Optional[str] = Field(description="Filter by chunk type ('text' or 'table')")
-    top_k: int = Field(description="Number of results", default=5)
 
 
 # ==================== State ====================
 
-class MiniAgentState(TypedDict):
-    """State flowing through graph."""
-    # User input
+class AgentState(TypedDict):
+    """Minimal state."""
     question: str
+    messages: Sequence[BaseMessage]
 
-    # LLM decisions
-    action: str  # "list_wells", "get_well", "search", "answer"
-    well_name: Optional[str]
-
-    # Search params (if searching)
+    # Agent decision
+    action: str
     search_params: Optional[Dict[str, Any]]
 
-    # Retrieved data
+    # Results
     search_results: Optional[str]
-    well_info: Optional[str]
-    wells_list: Optional[str]
-
-    # Output
-    answer: str
-
-    # Control
-    iteration: int
+    response: str
 
 
-# ==================== Nodes ====================
+# ==================== Single Agent Node ====================
 
-def llm_decision_node(state: MiniAgentState) -> MiniAgentState:
+def agent_decision_node(state: AgentState) -> AgentState:
     """
-    LLM decides what to do based on question and current state.
+    ONE LLM call that decides everything.
+
+    Can:
+    1. Answer directly (greetings, general questions, known info)
+    2. Provide search parameters (technical queries)
+    3. Ask for clarification (ambiguous questions)
     """
-    logger.info("=== LLM DECISION NODE ===")
+    logger.info("=== AGENT THINKING ===")
 
     question = state["question"]
-    iteration = state.get("iteration", 0)
+    messages = state.get("messages", [])
 
-    # Build context from what we know
-    context = []
-    if state.get("wells_list"):
-        context.append(f"Available wells: {state['wells_list']}")
-    if state.get("well_info"):
-        context.append(f"Well info: {state['well_info']}")
-    if state.get("search_results"):
-        context.append(f"Search results: {state['search_results'][:500]}...")
+    # Build conversation context
+    history = ""
+    if len(messages) > 1:
+        history = "\nRecent conversation:\n"
+        for msg in messages[-4:]:
+            role = "User" if isinstance(msg, HumanMessage) else "You"
+            history += f"{role}: {msg.content[:150]}\n"
 
-    context_str = "\n".join(context) if context else "No information gathered yet."
+    groq_chat_model = get_llm_service(
+        provider=LLMProvider.GROQ,
+        api_key=settings.GROQ_API_KEY
+    )
+    ollama_chat_model = get_llm_service()
+    llm = groq_chat_model.llm
 
-    # Create prompt
-    llm = get_llm_service().llm
-    parser = PydanticOutputParser(pydantic_object=AgentDecision)
+    parser = PydanticOutputParser(pydantic_object=AgentAction)
 
-    prompt = f"""You are helping answer a user's question about well data.
+    prompt = f"""{DOMAIN_CONTEXT}
 
-User Question: {question}
+{history}
 
-Current Information:
-{context_str}
+User: {question}
 
-Decide what to do next:
+Decide what to do:
 
-1. "list_wells" - If user didn't specify a well OR you need to see available wells
-2. "get_well" - If you have a well name but need to verify it exists
-3. "search" - If you have a well name and are ready to search documents
-4. "answer" - If you have enough information to answer the question
+1. ACTION='answer' - Answer directly if:
+   - Greeting (hello, hi, how are you)
+   - General question (what can you do, help)
+   - Example: "Hello" → direct_answer: "Hello! I can help with well completion data..."
 
-CRITICAL: 
-- If no well mentioned in question, you MUST list_wells first
-- If well mentioned but not verified, you MUST get_well first
-- Only search when you're sure which well to query
+2. ACTION='search' - Search documents if:
+   - User asks for specific technical data
+   - Provide complete search parameters:
+     * search_query: Optimized terms (e.g., "tubing inner diameter depth") - Always required
+     * well_name: Extract from question (e.g., "well-1") - Always required
+     * document_type: "WELL_REPORT" (default) or "PVT_REPORT" for fluid data
+     * chunk_type: "table" for specs/numbers, "text" for descriptions, null for both
+   - Example: "What's the tubing depth for well-1?"
+     → search_query: "tubing depth", well_name: "well-1", chunk_type: "table"
+
+3. ACTION='clarify' - Ask for clarification if:
+   - Question is ambiguous (e.g., "What's the pressure?" - which pressure?)
+   - Missing well name for specific query
+   - Example: "What's the tubing depth?" → "Which well would you like information about?"
+
+CRITICAL:
+- Use conversation history for context (if user mentioned well before, use it)
+- Be smart about what needs search vs direct answer
+- For technical specs, prioritize chunk_type="table"
+- Provide ALL search parameters in one shot
 
 {parser.get_format_instructions()}
 """
@@ -119,210 +176,111 @@ CRITICAL:
     try:
         response = llm.invoke(prompt)
         content = response.content if hasattr(response, 'content') else str(response)
-
         decision = parser.parse(content)
 
-        logger.info(f"LLM Decision: {decision.action} (well: {decision.well_name})")
-        logger.info(f"Reasoning: {decision.reasoning}")
+        logger.info(f"Decision: {decision.action} - {decision.reasoning}")
 
-        return {
-            **state,
-            "action": decision.action,
-            "well_name": decision.well_name,
-            "iteration": iteration + 1
-        }
-
-    except Exception as e:
-        logger.error(f"LLM decision failed: {e}")
-
-        # Fallback: Simple logic
-        if not state.get("wells_list"):
-            action = "list_wells"
-        elif state.get("search_results"):
-            action = "answer"
-        else:
-            action = "search"
-
-        return {
-            **state,
-            "action": action,
-            "iteration": iteration + 1
-        }
-
-
-def list_wells_node(state: MiniAgentState) -> MiniAgentState:
-    """List all available wells."""
-    logger.info("=== LIST WELLS NODE ===")
-
-    try:
-        wells = list_available_wells.invoke({})
-
-        wells_text = ""
-        for well in wells:
-            name = well.get('name', 'unknown')
-            count = well.get('document_count', 0)
-            wells_text += f"{name} ({count} docs), "
-
-        wells_text = wells_text.rstrip(", ")
-
-        logger.info(f"Listed {len(wells)} wells")
-
-        return {
-            **state,
-            "wells_list": wells_text
-        }
-    except Exception as e:
-        logger.error(f"List wells failed: {e}")
-        return {
-            **state,
-            "wells_list": f"Error: {str(e)}"
-        }
-
-
-def get_well_node(state: MiniAgentState) -> MiniAgentState:
-    """Get info about specific well."""
-    logger.info("=== GET WELL NODE ===")
-
-    well_name = state.get("well_name")
-
-    if not well_name:
-        return {
-            **state,
-            "well_info": "Error: No well name provided"
-        }
-
-    try:
-        well_data = get_well_by_name.invoke({"well_name": well_name})
-
-        if well_data:
-            docs = well_data.get("documents", [])
-            doc_types = [d.get("document_type", "unknown") for d in docs]
-
-            well_text = f"Well {well_name}: {len(docs)} documents"
-            well_text += f" (types: {', '.join(set(doc_types))})"
-
-            logger.info(f"Got well info: {well_name}")
+        # Route based on decision
+        if decision.action == "answer":
+            # Direct answer - done!
+            messages_updated = list(messages)
+            messages_updated.append(AIMessage(content=decision.direct_answer))
 
             return {
                 **state,
-                "well_info": well_text
+                "action": "answer",
+                "response": decision.direct_answer,
+                "messages": messages_updated
             }
-        else:
-            return {
-                **state,
-                "well_info": f"Well '{well_name}' not found"
-            }
-    except Exception as e:
-        logger.error(f"Get well failed: {e}")
-        return {
-            **state,
-            "well_info": f"Error: {str(e)}"
-        }
 
-
-def llm_search_params_node(state: MiniAgentState) -> MiniAgentState:
-    """
-    LLM provides search parameters.
-    """
-    logger.info("=== LLM SEARCH PARAMS NODE ===")
-
-    question = state["question"]
-    well_name = state.get("well_name")
-
-    llm = get_llm_service().llm
-    parser = PydanticOutputParser(pydantic_object=SearchParameters)
-
-    prompt = f"""Generate search parameters to answer this question.
-
-User Question: {question}
-Well Name: {well_name or "Not specified"}
-
-Provide optimized search parameters:
-
-1. query: Core search terms (optimize for retrieval)
-2. well_name: Which well to search (use '{well_name}' if known)
-3. document_id: Specific doc ID (usually null unless user mentions it)
-4. document_type: Use 'WELL_REPORT' for completion data, or null for all types
-5. chunk_type: Use 'table' for technical/numerical queries, 'text' for descriptive, or null for both
-6. top_k: Usually 5, increase to 10 for broad questions
-
-Examples:
-- "What's the tubing depth?" → query: "tubing depth", chunk_type: "table"
-- "Tell me about the reservoir" → query: "reservoir properties", chunk_type: null
-- "What's in the completion report?" → query: "completion", document_type: "WELL_REPORT"
-
-{parser.get_format_instructions()}
-"""
-
-    try:
-        response = llm.invoke(prompt)
-        content = response.content if hasattr(response, 'content') else str(response)
-
-        params = parser.parse(content)
-
-        # Convert to dict
-        params_dict = {
-            "query": params.query,
-            "well_name": params.well_name or well_name,
-            "document_id": params.document_id,
-            "document_type": params.document_type,
-            "chunk_type": params.chunk_type,
-            "top_k": params.top_k
-        }
-
-        logger.info(f"Search params: query='{params.query}', chunk_type={params.chunk_type}")
-
-        return {
-            **state,
-            "search_params": params_dict
-        }
-
-    except Exception as e:
-        logger.error(f"Search params generation failed: {e}")
-
-        # Fallback: Basic params
-        return {
-            **state,
-            "search_params": {
-                "query": question,
-                "well_name": well_name,
-                "document_id": None,
-                "document_type": "WELL_REPORT",
-                "chunk_type": None,
+        elif decision.action == "search":
+            # Need to search - save params
+            search_params = {
+                "query": decision.search_query,
+                "well_name": decision.well_name,
+                "document_type": decision.document_type or "WELL_REPORT",
+                "chunk_type": decision.chunk_type,
                 "top_k": 5
             }
-        }
+
+            logger.info(
+                f"Search: query='{decision.search_query}', "
+                f"well={decision.well_name}, chunk_type={decision.chunk_type}"
+            )
+
+            return {
+                **state,
+                "action": "search",
+                "search_params": search_params
+            }
+
+        else:  # clarify
+            messages_updated = list(messages)
+            messages_updated.append(AIMessage(content=decision.clarification_question))
+
+            return {
+                **state,
+                "action": "clarify",
+                "response": decision.clarification_question,
+                "messages": messages_updated
+            }
+
+    except Exception as e:
+        logger.error(f"Agent decision failed: {e}", exc_info=True)
+
+        # Fallback: Try to extract well name and search
+        import re
+        match = re.search(r'well[\s\-_]*(\d+)', question.lower())
+
+        if match:
+            num = match.group(1).lstrip('0') or '0'
+            well_name = f"well-{num}"
+
+            return {
+                **state,
+                "action": "search",
+                "search_params": {
+                    "query": question,
+                    "well_name": well_name,
+                    "document_type": "WELL_REPORT",
+                    "chunk_type": None,
+                    "top_k": 5
+                }
+            }
+        else:
+            # No well found - ask
+            fallback = "Which well would you like information about?"
+            messages_updated = list(messages)
+            messages_updated.append(AIMessage(content=fallback))
+
+            return {
+                **state,
+                "action": "clarify",
+                "response": fallback,
+                "messages": messages_updated
+            }
 
 
-def search_node(state: MiniAgentState) -> MiniAgentState:
-    """Execute search with provided parameters."""
-    logger.info("=== SEARCH NODE ===")
+def search_node(state: AgentState) -> AgentState:
+    """Execute search (only called if action='search')."""
+    logger.info("=== SEARCHING ===")
 
     params = state.get("search_params")
 
-    if not params:
-        return {
-            **state,
-            "search_results": "Error: No search parameters"
-        }
-
     try:
-        # Call RAG tool
         result = rag_query_tool.invoke(params)
-
         results_list = result.get("results", [])
 
         if not results_list:
             return {
                 **state,
-                "search_results": f"No results found for query '{params.get('query')}'"
+                "search_results": f"No results found for '{params['query']}' in {params['well_name']}"
             }
 
-        # Format with retriever
         retriever = get_retriever()
         formatted = retriever.format_context_for_llm(results_list, max_tokens=2000)
 
-        logger.info(f"Search returned {len(results_list)} results")
+        logger.info(f"Found {len(results_list)} results")
 
         return {
             **state,
@@ -333,38 +291,36 @@ def search_node(state: MiniAgentState) -> MiniAgentState:
         logger.error(f"Search failed: {e}")
         return {
             **state,
-            "search_results": f"Error: {str(e)}"
+            "search_results": f"Search error: {str(e)}"
         }
 
 
-def answer_node(state: MiniAgentState) -> MiniAgentState:
-    """LLM generates final answer."""
-    logger.info("=== ANSWER NODE ===")
+def answer_node(state: AgentState) -> AgentState:
+    """
+    Generate answer from search results.
+    ONE LLM call.
+    """
+    logger.info("=== ANSWERING ===")
 
     question = state["question"]
     search_results = state.get("search_results", "")
-    wells_list = state.get("wells_list", "")
+    messages = state.get("messages", [])
 
     llm = get_llm_service().llm
 
-    # Build context
-    context = []
-    if wells_list:
-        context.append(f"Available wells: {wells_list}")
-    if search_results:
-        context.append(f"Retrieved information:\n{search_results}")
+    prompt = f"""{DOMAIN_CONTEXT}
 
-    context_str = "\n\n".join(context) if context else "No information available."
+User asked: "{question}"
 
-    prompt = f"""Answer the user's question based on the information below.
+Retrieved information:
+{search_results}
 
-User Question: {question}
-
-Information:
-{context_str}
-
-Provide a clear, direct answer. If information is missing, say so clearly.
-Include specific values, numbers, and cite sources when possible.
+Provide a clear, accurate answer:
+- Extract the specific value/information requested
+- Include units and values
+- Cite sources
+- Use proper oil & gas terminology
+- If data missing, say so honestly
 
 Answer:"""
 
@@ -372,198 +328,146 @@ Answer:"""
         response = llm.invoke(prompt)
         answer = response.content if hasattr(response, 'content') else str(response)
 
-        logger.info("Generated answer")
+        messages_updated = list(messages)
+        messages_updated.append(AIMessage(content=answer))
 
         return {
             **state,
-            "answer": answer.strip()
+            "response": answer.strip(),
+            "messages": messages_updated
         }
 
     except Exception as e:
         logger.error(f"Answer generation failed: {e}")
+
+        error_msg = f"I found information but couldn't process it: {str(e)}"
+        messages_updated = list(messages)
+        messages_updated.append(AIMessage(content=error_msg))
+
         return {
             **state,
-            "answer": f"Error generating answer: {str(e)}"
+            "response": error_msg,
+            "messages": messages_updated
         }
 
 
 # ==================== Routing ====================
 
-def route_action(state: MiniAgentState) -> Literal["list_wells", "get_well", "search_params", "answer", "end"]:
-    """Route based on LLM's decision."""
+def route_action(state: AgentState) -> Literal["done", "search"]:
+    """Simple routing based on agent's decision."""
+    action = state.get("action", "done")
 
-    action = state.get("action", "list_wells")
-    iteration = state.get("iteration", 0)
-
-    # Safety: prevent infinite loops
-    if iteration >= 10:
-        logger.warning("Max iterations reached")
-        return "end"
-
-    logger.info(f"Routing to: {action}")
-
-    if action == "list_wells":
-        return "list_wells"
-    elif action == "get_well":
-        return "get_well"
-    elif action == "search":
-        return "search_params"
-    elif action == "answer":
-        return "answer"
-    else:
-        return "end"
+    if action == "search":
+        return "search"
+    else:  # "answer" or "clarify"
+        return "done"
 
 
 # ==================== Build Graph ====================
 
-def create_mini_agent():
+def create_efficient_agent():
     """
-    Create mini LangGraph agent.
-
-    Flow:
-        START
-          ↓
-        llm_decision ←─────────┐
-          ↓                    │
-        [route by action]      │
-          ├─ list_wells ───────┘ (loop back)
-          ├─ get_well ─────────┘ (loop back)
-          ├─ search_params     │
-          │    ↓               │
-          │  search ───────────┘ (loop back)
-          ├─ answer → END
-          └─ end → END
+    Minimal graph:
+    - 1 LLM call if answering directly
+    - 2 LLM calls if search needed
     """
-    workflow = StateGraph(MiniAgentState)
+    workflow = StateGraph(AgentState)
 
-    # Add nodes
-    workflow.add_node("llm_decision", llm_decision_node)
-    workflow.add_node("list_wells", list_wells_node)
-    workflow.add_node("get_well", get_well_node)
-    workflow.add_node("search_params", llm_search_params_node)
+    # Nodes
+    workflow.add_node("agent", agent_decision_node)
     workflow.add_node("search", search_node)
     workflow.add_node("answer", answer_node)
 
-    # Entry point
-    workflow.set_entry_point("llm_decision")
+    # Entry
+    workflow.set_entry_point("agent")
 
-    # Route based on LLM decision
+    # Route based on agent decision
     workflow.add_conditional_edges(
-        "llm_decision",
+        "agent",
         route_action,
         {
-            "list_wells": "list_wells",
-            "get_well": "get_well",
-            "search_params": "search_params",
-            "answer": "answer",
-            "end": END
+            "search": "search",
+            "done": END
         }
     )
 
-    # After actions, go back to LLM decision
-    workflow.add_edge("list_wells", "llm_decision")
-    workflow.add_edge("get_well", "llm_decision")
-
-    # Search flow
-    workflow.add_edge("search_params", "search")
-    workflow.add_edge("search", "llm_decision")
-
-    # Answer ends
+    # Search → Answer → Done
+    workflow.add_edge("search", "answer")
     workflow.add_edge("answer", END)
 
     return workflow.compile()
 
 
-# ==================== Agent Wrapper ====================
+# ==================== Agent ====================
 
-class MiniLangGraphAgent:
+class EfficientAgent:
     """
-    Mini LangGraph agent for simple Q&A.
+    Efficient agent - minimal LLM calls.
 
-    LLM decides:
-    - When to list wells
-    - When to get well info
-    - What search parameters to use
-    - When to provide final answer
+    Calls:
+    - Greeting/General: 1 LLM call
+    - Technical query: 2 LLM calls (decision + answer)
     """
 
     def __init__(self):
-        self.graph = create_mini_agent()
-        logger.info("✓ Mini LangGraph Agent initialized")
+        self.graph = create_efficient_agent()
+        self.conversation_history: List[BaseMessage] = []
+        logger.info("✓ Agent initialized")
 
-    def ask(self, question: str) -> str:
-        """
-        Ask a question.
+    def ask(self, question: str, reset: bool = False) -> str:
+        """Ask a question."""
 
-        Args:
-            question: User's question
+        if reset:
+            self.conversation_history = []
 
-        Returns:
-            Answer string
-        """
         logger.info("=" * 80)
-        logger.info(f"Question: {question}")
+        logger.info(f"Q: {question}")
         logger.info("=" * 80)
 
-        initial_state: MiniAgentState = {
+        self.conversation_history.append(HumanMessage(content=question))
+
+        initial_state: AgentState = {
             "question": question,
+            "messages": self.conversation_history,
             "action": "",
-            "well_name": None,
             "search_params": None,
             "search_results": None,
-            "well_info": None,
-            "wells_list": None,
-            "answer": "",
-            "iteration": 0
+            "response": ""
         }
 
         try:
             final_state = self.graph.invoke(initial_state)
 
-            answer = final_state.get("answer", "No answer generated")
+            self.conversation_history = list(final_state.get("messages", []))
 
-            logger.info(f"✓ Complete after {final_state.get('iteration', 0)} iterations")
+            response = final_state.get("response", "No response generated")
 
-            return answer
+            logger.info(f"✓ Complete")
+            return response
 
         except Exception as e:
-            logger.error(f"✗ Failed: {e}", exc_info=True)
-            return f"Error: {str(e)}"
+            logger.error(f"Failed: {e}", exc_info=True)
+            error_msg = f"Error: {str(e)}"
+            self.conversation_history.append(AIMessage(content=error_msg))
+            return error_msg
 
-    def stream_ask(self, question: str):
-        """
-        Ask question with streaming (see each step).
-
-        Usage:
-            for step in agent.stream_ask("What's the tubing depth?"):
-                print(step)
-        """
-        initial_state: MiniAgentState = {
-            "question": question,
-            "action": "",
-            "well_name": None,
-            "search_params": None,
-            "search_results": None,
-            "well_info": None,
-            "wells_list": None,
-            "answer": "",
-            "iteration": 0
-        }
-
-        for output in self.graph.stream(initial_state):
-            yield output
+    def clear_history(self):
+        """Clear conversation history."""
+        self.conversation_history = []
+        logger.info("History cleared")
 
 
-# ==================== Interactive Terminal ====================
+# ==================== Interactive ====================
 
 def interactive_mode():
-    """Run agent in interactive terminal."""
+    """Interactive mode."""
     print("\n" + "=" * 80)
-    print("MINI LANGGRAPH AGENT - Interactive Mode")
+    print("EFFICIENT WELL ANALYSIS AGENT")
     print("=" * 80)
-    print("\nLLM-driven Q&A agent. Type 'exit' to quit.\n")
+    print("\nOptimized for speed and accuracy!")
+    print("Commands: 'reset', 'exit'\n")
 
-    agent = MiniLangGraphAgent()
+    agent = EfficientAgent()
 
     while True:
         try:
@@ -572,49 +476,24 @@ def interactive_mode():
             if not question:
                 continue
 
-            if question.lower() in ['exit', 'quit', 'q']:
+            if question.lower() in ['exit', 'quit']:
                 print("\nGoodbye!")
                 break
 
+            if question.lower() == 'reset':
+                agent.clear_history()
+                print("\n✓ Conversation reset")
+                continue
+
             print("\nAgent: ", end="", flush=True)
             answer = agent.ask(question)
+            print()
             print(answer)
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")
             break
-        except Exception as e:
-            print(f"\nError: {e}")
-
-
-def test_mode():
-    """Test with sample questions."""
-    print("\n" + "=" * 80)
-    print("Testing Mini LangGraph Agent")
-    print("=" * 80)
-
-    agent = MiniLangGraphAgent()
-
-    test_questions = [
-        "List all wells",
-        "What is the tubing depth for well-1?",
-        "What's the API gravity?",  # No well specified
-        "Tell me about the reservoir in well-1",
-    ]
-
-    for question in test_questions:
-        print("\n" + "-" * 80)
-        print(f"Q: {question}")
-        print("-" * 80)
-
-        answer = agent.ask(question)
-        print(f"A: {answer}")
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        test_mode()
-    else:
-        interactive_mode()
+    interactive_mode()

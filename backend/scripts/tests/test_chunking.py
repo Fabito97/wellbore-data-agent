@@ -214,7 +214,9 @@ def main():
 
     # First, process the document
     print("\n⏳ Processing document...")
-    document = process_pdf(pdf_path)
+
+    well_id = "well-1_27288447748_010"
+    document = process_pdf(pdf_path, well_id=well_id, well_name="well-1", document_type="PVT")
     print(f"✅ Document processed: {document.page_count} pages")
 
     # Run tests

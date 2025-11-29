@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional
 import pdfplumber
 import fitz  # PyMuPDF
+from pypdfium2._cli import extract_images
 from sympy.codegen.ast import continue_
 
 from app.core.config import settings
@@ -42,7 +43,8 @@ class PDFExtractor:
     def __init__(
             self,
             extract_tables: bool = True,
-            table_method: TableExtractionMethod = TableExtractionMethod.PDFPLUMBER,
+            extract_images: bool = True,
+            table_method: TableExtractionMethod = TableExtractionMethod.CAMELOT,
             enable_ocr: bool = False
     ):
         """
@@ -56,10 +58,16 @@ class PDFExtractor:
         self.extract_tables = extract_tables
         self.table_method = table_method
         self.enable_ocr = enable_ocr
+        self.extract_images = extract_images
 
         self.table_extractor = None
         if extract_tables:
             self.table_extractor = TableExtractor(method=table_method)
+
+        self.image_extractor = None
+        if extract_images:
+            self.image_extractor = ImageExtractor()
+
 
         self.ocr_extractor = None
         if enable_ocr:
@@ -67,7 +75,7 @@ class PDFExtractor:
 
         logger.info(
             f"PDFExtractor initialized: "
-            f"tables={extract_tables}, ocr={enable_ocr}"
+            f"tables={extract_tables} with {self.table_method}, ocr={enable_ocr}"
         )
 
     def extract(
@@ -234,7 +242,7 @@ class PDFExtractor:
             has_images = len(pymupdf_page.get_images(full=True)) > 0
 
             if has_images:
-                images.extend(self._extract_images(
+                images.extend(self.image_extractor.extract_images(
                     pymupdf_page,
                     page_number,
                     file_path,
@@ -253,7 +261,7 @@ class PDFExtractor:
 
             ocr_result = self.ocr_extractor.extract_text(file_path, page_number)
 
-            if ocr_result and ocr_result.get('confidence', 0) > 0.6:
+            if ocr_result and ocr_result.get('confidence', 0) > settings.OCR_CONFIDENCE_THRESHOLD:
                 text = ocr_result['text']
                 ocr_confidence = ocr_result['confidence']
                 logger.debug(f"OCR successful: confidence={ocr_confidence:.2f}")
@@ -278,76 +286,6 @@ class PDFExtractor:
             is_scanned=is_scanned,
             ocr_confidence=ocr_confidence
         )
-
-
-    def _extract_images(
-            self,
-            page: fitz.Page,
-            page_number: int,
-            file_path: Path,
-            well_id: str = None
-    ) -> List[ImageData]:
-        """
-        Extract images from a page.
-
-        Args:
-            file_path: Path to PDF
-            page_number: Page number
-            pymupdf_page: PyMuPDF page object
-
-        Returns:
-            List of image metadata dicts
-        """
-        # Build path: e.g. UPLOAD_DIR/<well_id>/images/
-
-        folder = well_id or "unknown_well"
-        images_dir = settings.UPLOAD_DIR / folder / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-
-        image_list = []
-        seen_hashes = set()
-
-        for idx, img in enumerate(page.get_images(full=True)):
-            xref = img[0]
-            pix = fitz.Pixmap(page.parent, xref)
-            image_path = images_dir / f"{file_path.stem}_page{page_number}_img{idx}.png"
-            pix.save(image_path)
-
-            # ---- Filtering heuristics ---
-            x0, y0, x1, y1 = img[1:5]
-            width, height = x1 - x0, y1 - y0
-
-            if width < 50 or height < 50: # skip tiny images
-                continue
-
-            if image_path.stat().st_size < 10_000: # skip very small files (10kb)
-                continue
-
-            # duplicate check
-            import hashlib
-            with open(image_path, "rb") as f:
-                file_hash = hashlib.md5(f.read()).hexdigest()
-
-            if file_hash in seen_hashes:
-                continue
-
-            seen_hashes.add(file_hash)
-
-            # Keep relevant images
-            image_data = ImageData(
-                page_number=page_number,
-                image_index=idx,
-                file_path=str(image_path),
-                bbox=img[1:5],  # could be filled with img[1:5] if you want coordinates
-                detected_by="pymupdf",
-                extraction_method="embedded",
-                ocr_text=None,
-                ocr_confidence=None,
-                is_scanned=False,
-                is_inline=True
-            )
-            image_list.append(image_data)
-        return image_list
 
 
     def _extract_text(

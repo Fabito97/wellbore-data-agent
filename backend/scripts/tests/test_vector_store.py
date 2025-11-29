@@ -200,7 +200,7 @@ def test_get_by_id(store: VectorStore, chunks):
 
     print(f"\n🔍 Retrieving chunk: {chunk_id}")
 
-    result = store.get_by_id(chunk_id)
+    result = store.get_by_chunk_id(chunk_id)
 
     if result:
         print(f"   ✅ Found chunk!")

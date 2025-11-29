@@ -6,6 +6,8 @@ Now stores:
 - Document metadata in DB
 - Chunks in vector store (as before)
 """
+from multipart import file_path
+
 from app.utils.folder_utils import scan_folder_structure, normalize_zip_structure, extract_well_name
 from app.utils.helper import normalize_well_name
 from app.utils.logger import get_logger
@@ -20,13 +22,12 @@ from sqlalchemy import select
 from fastapi import Depends
 
 from app.models.document import (
-    DocumentContent,
     DocumentStatus,
     DocumentUploadResponse,
     DocumentProcessingError,
     BatchUploadResponse
 )
-from app.core.database import Well, Document, get_db
+from app.db.database import Well, Document, get_db
 from app.rag.document_processor import process_pdf
 from app.rag.chunking import chunk_document
 from app.rag.embeddings import embed_chunks
@@ -109,7 +110,8 @@ class DocumentService:
                             well_id=well_id,
                             well_name=well_name,
                             document_type=doc_type,
-                            original_folder_path=str(file_path.parent.relative_to(folder_path))
+                            original_folder_path=str(file_path.parent.relative_to(folder_path)),
+                            file_format =file_path.name.suffix
                         )
 
                         if isinstance(resp, DocumentUploadResponse):
@@ -184,7 +186,7 @@ class DocumentService:
             )
 
             # Process PDF
-            document_content = process_pdf(file_path=permanent_path, document_id=doc_id, well_id=well_id)
+            document_content = process_pdf(file_path=permanent_path, document_id=doc_id, well_id=well_id, well_name=well_name)
 
             # Attach properties
             document_content.filename = original_filename
@@ -417,7 +419,7 @@ class DocumentService:
             return None
 
         # 2. Get all vector chunks for this document
-        chunks = self.vector_store.get_by_document_id_or_type(document_id=document_id)
+        chunks = self.vector_store.get_by_document_id(document_id=document_id)
 
         # 3. Build response
         return {
@@ -595,7 +597,7 @@ class DocumentService:
             logger.info("Vector store cleared")
 
             # Delete DB file (SQLite)
-            from app.core.database import reset_database
+            from app.db.database import reset_database
             reset_database()
 
             # Delete all uploads

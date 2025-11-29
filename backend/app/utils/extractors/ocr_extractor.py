@@ -16,9 +16,18 @@ logger = get_logger(__name__)
 class OCRExtractor:
     """Extracts text from scanned pages using OCR."""
 
-    def __init__(self):
-        """Initialize OCR extractor."""
+    def __init__(self, dpi: int = 300, lang: str = "eng"):
+        """
+        Initialize OCR extractor.
+
+        Args:
+            dpi: Resolution for PDF to image conversion
+            lang: OCR language (default: English)
+        """
         self.available = False
+        self.dpi = dpi
+        self.lang = lang
+
 
         try:
             import pytesseract
@@ -53,7 +62,7 @@ class OCRExtractor:
         """
         if not self.available:
             return None
-
+        image = None
         try:
             # Convert PDF page to image
             images = self.convert_from_path(
@@ -74,12 +83,12 @@ class OCRExtractor:
             # Get confidence
             ocr_data = self.pytesseract.image_to_data(
                 image,
+                lang=self.lang,
                 output_type=self.pytesseract.Output.DICT
             )
 
             confidences = [
-                int(c) for c in ocr_data['conf']
-                if c != '-1'
+                int(c) for c in ocr_data.get("conf", []) if c != '-1'
             ]
 
             avg_confidence = (
@@ -87,9 +96,14 @@ class OCRExtractor:
                 if confidences else 0.0
             )
 
-            logger.debug(f"OCR page {page_number}: confidence={avg_confidence:.2f}")
+            logger.debug(
+                f"OCR page {page_number}: confidence={avg_confidence:.2f}, "
+                f"text_length={len(ocr_text.strip())}"
+            )
 
             return {
+                "page_number": page_number,
+                "raw_data": ocr_data,  # optional, useful for debugging
                 'text': ocr_text.strip(),
                 'confidence': avg_confidence
             }
@@ -97,3 +111,12 @@ class OCRExtractor:
         except Exception as e:
             logger.error(f"OCR failed for page {page_number}: {e}")
             return None
+
+        finally:
+            # force garbage collection of image objects
+            if image is not None:
+                import gc
+
+                del image
+                gc.collect()
+

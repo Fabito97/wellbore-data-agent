@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.tools import tool
 
-from app.core.database import SessionLocal
+from app.db.database import SessionLocal
 from app.rag.retriever import get_retriever
 from app.services.document_service import DocumentService, get_document_service
 from app.utils.helper import normalize_well_name

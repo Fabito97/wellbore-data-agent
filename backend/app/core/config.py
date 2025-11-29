@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     # ==================== Embedding Configuration ====================
     # Embedding model - must be specified
     EMBEDDING_MODEL: str  # e.g., "sentence-transformers/all-MiniLM-L6-v2"
+    RERANKER_MODEL: str  # e.g., "sentence-transformers/all-MiniLM-L6-v2"
 
     # Model metadata (match your chosen model)
     EMBEDDING_DIMENSION: int = 384  # for all-MiniLM-L6-v2
@@ -133,7 +134,7 @@ class Settings(BaseSettings):
     # PDF processing flags
     PDF_EXTRACT_IMAGES: bool = True
     PDF_EXTRACT_TABLES: bool = True
-
+    OCR_CONFIDENCE_THRESHOLD: float = 0.6
     # ==================== Agent Configuration ====================
     MAX_AGENT_ITERATIONS: int = 5
     AGENT_STREAMING: bool = True
@@ -190,6 +191,10 @@ class Settings(BaseSettings):
 
             # Embedding config (common requirement)
         if not self.EMBEDDING_MODEL:
+            errors.append("EMBEDDING_MODEL is required")
+
+        # Reranker config (common requirement)
+        if not self.RERANKER_MODEL:
             errors.append("EMBEDDING_MODEL is required")
 
         return errors
